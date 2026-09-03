@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- V.Smile TV mascot face: white screen with wavy edge on full-bleed orange. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- wavy white screen -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M32,29 Q38,27 46,28.2 Q54,29.5 62,28 Q70,26.5 76,28.2 Q82,30 83.8,36 Q85.5,42 84.2,48 Q83,54 84.5,60.5 Q86,67 84,73 Q82,79 75,80.5 Q68,82 61,80.8 Q54,79.5 46,81 Q38,82.5 32,80.2 Q26,78 24.2,72 Q22.5,66 23.8,60 Q25,54 23.5,47 Q22,40 24,35.5 Q26,31 32,29 Z" />
+    <!-- eyes: tilted black ovals with highlights -->
+    <group android:rotation="-14" android:pivotX="47.5" android:pivotY="43">
+        <path android:fillColor="#000000"
+            android:pathData="M47.5,36.5 a3.75,6.5 0 1,0 0.001,0 z" />
+        <path android:fillColor="#FFFFFF"
+            android:pathData="M46.4,38.6 a1.2,1.8 0 1,0 0.001,0 z" />
+    </group>
+    <group android:rotation="-14" android:pivotX="59.5" android:pivotY="41.5">
+        <path android:fillColor="#000000"
+            android:pathData="M59.5,35 a3.75,6.5 0 1,0 0.001,0 z" />
+        <path android:fillColor="#FFFFFF"
+            android:pathData="M58.4,37.1 a1.2,1.8 0 1,0 0.001,0 z" />
+    </group>
+    <!-- smile crescent -->
+    <path
+        android:fillColor="#F7941D"
+        android:pathData="M40,55 C46,66.5 62,66.5 68,55 C64,74 44,74 40,55 Z" />
+    <!-- cheek balls, same orange as the mouth -->
+    <path
+        android:fillColor="#F7941D"
+        android:pathData="M40,51.6 a3.4,3.4 0 1,0 0.001,0 z" />
+    <path
+        android:fillColor="#F7941D"
+        android:pathData="M68,51.6 a3.4,3.4 0 1,0 0.001,0 z" />
+</vector>

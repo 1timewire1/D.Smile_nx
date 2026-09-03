@@ -1,0 +1,22 @@
+# Big local-only dirs
+/toolchain/
+/reference/
+*.bin
+*.zip
+
+# Build outputs
+/app/build/
+/app/.cxx/
+/build/
+.gradle/
+local.properties
+/test/out/
+/switch/build/
+/switch/*.elf
+/switch/*.nro
+/switch/*.nacp
+
+# IDE / local
+.idea/
+*.iml
+.claude/settings.local.json

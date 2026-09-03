@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Frontend launchers (iiSU etc.) pass raw file paths; sideload-only app. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <!-- Single GitHub API call on the game-list screen to offer new releases. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:label="D.Smile"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/Theme.DSmile"
+        android:isGame="true"
+        android:hardwareAccelerated="true"
+        android:allowBackup="true">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@style/Theme.DSmile">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Exported game activity: frontends (iiSU / Daijisho / ES-DE / Pegasus) launch this
+             directly with an explicit component + ACTION_VIEW data Uri and/or ROM extras. -->
+        <activity
+            android:name=".ui.EmuActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|smallestScreenSize"
+            android:theme="@style/Theme.DSmile.Fullscreen">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="com.dsmile.emulator.LAUNCH_GAME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
