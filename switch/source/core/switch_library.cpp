@@ -10,6 +10,7 @@
 #include <glad/glad.h>
 
 #include "switch_settings.h"
+#include "switch_zip.h"
 #include "third_party/stb_image.h"
 
 namespace {
@@ -23,6 +24,13 @@ bool HasBinExtension(const std::string& name) {
   return ext == ".bin";
 }
 
+bool HasZipExtension(const std::string& name) {
+  if (name.size() < 4) return false;
+  std::string ext = name.substr(name.size() - 4);
+  for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+  return ext == ".zip";
+}
+
 bool FileExists(const std::string& path) {
   FILE* f = fopen(path.c_str(), "rb");
   if (!f) return false;
@@ -30,13 +38,12 @@ bool FileExists(const std::string& path) {
   return true;
 }
 
-// Same-basename *.png next to the .bin, e.g. games/Aladdin.bin ->
-// games/Aladdin.png. PNG only (matches third_party/stb_image.cpp's
-// STBI_ONLY_PNG - same choice the Yokoi reference port made for its own
-// art, keeping the decoder small).
-uint32_t LoadCoverTexture(const std::string& bin_path, int& out_w, int& out_h) {
+// Same-basename *.png next to the .bin or .zip, e.g. games/Aladdin.bin ->
+// games/Aladdin.png or games/Aladdin.zip -> games/Aladdin.png
+// PNG only (matches third_party/stb_image.cpp's STBI_ONLY_PNG).
+uint32_t LoadCoverTexture(const std::string& game_path, int& out_w, int& out_h) {
   out_w = out_h = 0;
-  std::string png_path = bin_path.substr(0, bin_path.size() - 4) + ".png";
+  std::string png_path = game_path.substr(0, game_path.size() - 4) + ".png";
   if (!FileExists(png_path)) return 0;
 
   int w = 0, h = 0, channels = 0;
@@ -64,17 +71,34 @@ void ScanFolder(const std::string& folder) {
   while (struct dirent* ent = readdir(dir)) {
     if (ent->d_name[0] == '.') continue;
     std::string name = ent->d_name;
-    if (!HasBinExtension(name)) continue;
 
-    LibraryGame g;
-    g.full_path = folder + "/" + name;
-    g.display_name = name.substr(0, name.size() - 4);
+    // Check for .bin files
+    if (HasBinExtension(name)) {
+      LibraryGame g;
+      g.full_path = folder + "/" + name;
+      g.display_name = name.substr(0, name.size() - 4);
 
-    struct stat st{};
-    if (stat(g.full_path.c_str(), &st) == 0) g.mtime = (long long)st.st_mtime;
+      struct stat st{};
+      if (stat(g.full_path.c_str(), &st) == 0) g.mtime = (long long)st.st_mtime;
 
-    g.cover_tex = LoadCoverTexture(g.full_path, g.cover_w, g.cover_h);
-    g_games.push_back(std::move(g));
+      g.cover_tex = LoadCoverTexture(g.full_path, g.cover_w, g.cover_h);
+      g_games.push_back(std::move(g));
+    }
+    // Check for .zip files
+    else if (HasZipExtension(name)) {
+      // Validate that this is a valid ZIP archive containing a .bin file
+      if (switch_zip_is_valid(folder + "/" + name)) {
+        LibraryGame g;
+        g.full_path = folder + "/" + name;
+        g.display_name = name.substr(0, name.size() - 4);
+
+        struct stat st{};
+        if (stat(g.full_path.c_str(), &st) == 0) g.mtime = (long long)st.st_mtime;
+
+        g.cover_tex = LoadCoverTexture(g.full_path, g.cover_w, g.cover_h);
+        g_games.push_back(std::move(g));
+      }
+    }
   }
   closedir(dir);
 }
