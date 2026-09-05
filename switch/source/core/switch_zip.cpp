@@ -95,7 +95,7 @@ bool switch_zip_extract_bin(const std::string& zip_path, std::vector<uint8_t>& o
 
   // Scan through all local file headers looking for the first .bin file
   while (!found) {
-    long offset = ftell(f);
+    long file_header_offset = ftell(f);
     uint8_t header[30];
 
     if (fread(header, 1, 30, f) != 30) break;
@@ -103,10 +103,13 @@ bool switch_zip_extract_bin(const std::string& zip_path, std::vector<uint8_t>& o
     uint32_t signature = ReadU32LE(header);
     if (signature != 0x04034b50) break;  // End of local headers
 
+    uint16_t compression = ReadU16LE(&header[8]);
+    uint32_t compressed_size = ReadU32LE(&header[18]);
+    uint32_t uncompressed_size = ReadU32LE(&header[22]);
     uint16_t filename_len = ReadU16LE(&header[26]);
     uint16_t extra_len = ReadU16LE(&header[28]);
 
-    // Read filename
+    // Read filename to check if it's a .bin file
     std::vector<char> filename(filename_len + 1, '\0');
     if (fread(filename.data(), 1, filename_len, f) != filename_len) break;
 
@@ -121,23 +124,16 @@ bool switch_zip_extract_bin(const std::string& zip_path, std::vector<uint8_t>& o
       std::string ext = fname_lower.substr(fname_lower.size() - 4);
       if (ext == ".bin") {
         // Found a .bin file - extract it
-        if (ExtractZipEntry(f, offset, out_data)) {
+        if (ExtractZipEntry(f, file_header_offset, out_data)) {
           found = true;
           break;
         }
       }
     }
 
-    // Skip to next local header
-    if (fseek(f, offset + 30 + filename_len + extra_len, SEEK_SET) != 0) break;
-
-    // Read compressed/uncompressed size to skip file data
-    if (fseek(f, 18, SEEK_CUR) != 0) break;
-    uint8_t sizes[8];
-    if (fread(sizes, 1, 8, f) != 8) break;
-
-    uint32_t compressed_size = ReadU32LE(sizes);
-    long next_offset = ftell(f) + compressed_size;
+    // Skip to next local file header
+    // The next header is at: current_header_offset + 30 + filename_len + extra_len + compressed_size
+    long next_offset = file_header_offset + 30 + filename_len + extra_len + compressed_size;
     if (fseek(f, next_offset, SEEK_SET) != 0) break;
   }
 
