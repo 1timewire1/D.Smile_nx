@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <dirent.h>
 #include <strings.h>
 #include <sys/stat.h>
@@ -10,17 +11,19 @@
 #include <glad/glad.h>
 
 #include "switch_settings.h"
+#include "switch_zip.h"
 #include "third_party/stb_image.h"
 
 namespace {
 
 std::vector<LibraryGame> g_games;
 
-bool HasBinExtension(const std::string& name) {
-  if (name.size() < 4) return false;
-  std::string ext = name.substr(name.size() - 4);
+bool HasExtension(const std::string& name, const char* ext_lower) {
+  const size_t len = std::strlen(ext_lower);
+  if (name.size() < len) return false;
+  std::string ext = name.substr(name.size() - len);
   for (char& c : ext) c = (char)std::tolower((unsigned char)c);
-  return ext == ".bin";
+  return ext == ext_lower;
 }
 
 bool FileExists(const std::string& path) {
@@ -30,13 +33,15 @@ bool FileExists(const std::string& path) {
   return true;
 }
 
-// Same-basename *.png next to the .bin, e.g. games/Aladdin.bin ->
-// games/Aladdin.png. PNG only (matches third_party/stb_image.cpp's
-// STBI_ONLY_PNG - same choice the Yokoi reference port made for its own
-// art, keeping the decoder small).
-uint32_t LoadCoverTexture(const std::string& bin_path, int& out_w, int& out_h) {
+// Same-basename *.png next to the .bin/.zip, e.g. games/Aladdin.bin ->
+// games/Aladdin.png (or games/Aladdin.zip -> games/Aladdin.png - cover art
+// always lives next to the game file itself, never inside the zip). PNG
+// only (matches third_party/stb_image.cpp's STBI_ONLY_PNG - same choice
+// the Yokoi reference port made for its own art, keeping the decoder
+// small).
+uint32_t LoadCoverTexture(const std::string& game_path, int& out_w, int& out_h) {
   out_w = out_h = 0;
-  std::string png_path = bin_path.substr(0, bin_path.size() - 4) + ".png";
+  std::string png_path = game_path.substr(0, game_path.size() - 4) + ".png";
   if (!FileExists(png_path)) return 0;
 
   int w = 0, h = 0, channels = 0;
@@ -64,10 +69,19 @@ void ScanFolder(const std::string& folder) {
   while (struct dirent* ent = readdir(dir)) {
     if (ent->d_name[0] == '.') continue;
     std::string name = ent->d_name;
-    if (!HasBinExtension(name)) continue;
+    const std::string full_path = folder + "/" + name;
+
+    const bool is_bin = HasExtension(name, ".bin");
+    // A .zip is only listed if it actually starts with a valid ZIP local
+    // file header - switch_zip_extract_bin() (called at launch time, see
+    // main.cpp's LoadGame()) still has the final say on whether a .bin is
+    // actually inside and extractable, but this keeps a garbage .zip from
+    // cluttering the list as a game that can never launch.
+    const bool is_zip = HasExtension(name, ".zip") && switch_zip_is_valid(full_path);
+    if (!is_bin && !is_zip) continue;
 
     LibraryGame g;
-    g.full_path = folder + "/" + name;
+    g.full_path = full_path;
     g.display_name = name.substr(0, name.size() - 4);
 
     struct stat st{};

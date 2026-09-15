@@ -10,6 +10,30 @@ digitizer, V.Link, plus a Jammin' Gym Class dance mat finding that turned
 out to need no work at all) - see "Documented for later: other V.Smile
 peripherals" below; nothing here changes any actual behavior.
 
+**This pass**: 4 more Shader options - Scale2x, Scale3x, Super2xSaI, and
+zfast-crt - ported this time from `libretro/common-shaders` directly
+rather than through DraStic's bundle, since that ecosystem is much bigger
+than the one DraStic happened to carry a slice of. See "New this pass:
+more shader ports (libretro/common-shaders)" below for why those 4 out of
+that much larger set, and an important caveat this batch has that the
+previous one didn't: that repo is Cg, not GLSL, so this is a hand
+translation verified line-by-line against the original rather than a
+mechanical rename. **Hardware-untested** - all 4 need a real run,
+including confirming the Cg→GLSL translation didn't introduce a subtle
+bug the build alone can't catch (no GLSL compiler runs until the Switch's
+own GPU driver does, at launch).
+
+**Previous pass**: 7 Shader options, ported from
+`reference/DrasticDS_nx-main`'s bundled shader collection - see "New in
+the previous pass: shader ports" below for exactly which ones, why those
+7 specifically, and why they're shown under their original RetroArch/
+libretro names (LCD1x, Sharp Bilinear, etc.) rather than the "DraStic
+<name>" labels a first attempt used, which turned out to misattribute
+them. Hardware-confirmed working, including the two heaviest (5xBR, SABR)
+at a playable frame rate on stock clocks - paired with the frame skip
+setting already recommended for stock, non-overclocked hardware, as
+expected going in.
+
 Status: the original bring-up, the ROM browser/BIOS pass, the menu redesign,
 Graphics settings, Controller settings, the settings-screen scrolling fix,
 the in-game pause menu, save states, the -O3/LTO/frame-skip performance
@@ -59,6 +83,266 @@ both redundant and not actually a fix for this, in "Two-player controller
 support" below. Testing also surfaced that V.Smile Art Studio expects a
 digitizer/pen input this port doesn't have yet - noted, not investigated
 further this pass (see its own section below).
+
+## New this pass: more shader ports (libretro/common-shaders)
+
+Settings > Graphics > Shader gained 4 more options this pass - Scale2x,
+Scale3x, Super2xSaI, and zfast-crt - bringing the total to 14. Same idea
+as the previous pass (porting known-good shaders from the wider
+RetroArch/libretro ecosystem rather than writing new ones from scratch),
+but sourced directly from
+[libretro/common-shaders](https://github.com/libretro/common-shaders) this
+time instead of through DraStic's own curated subset of it.
+
+**The real difference from last time: this repo is Cg, not GLSL.** The
+DraStic bundle's `.dsd` files turned out to already be GLSL ES 1.00 in a
+text wrapper, so that port was a mechanical rename. `common-shaders` is
+written in Cg (`float4`/`float3` instead of `vec4`/`vec3`, `tex2D`-style
+sampling via `COMPAT_Sample*` macros, semantic-bound struct fields like
+`float2 texCoord : TEXCOORD0`) - a close cousin of GLSL with a direct
+equivalent for everything used here, but porting it is a real hand
+translation, not a rename. Each of the 4 below was checked line-by-line
+against its downloaded `.cg` source (`libretro/common-shaders`'s `crt/`,
+`scalenx/`, and `xsai/` directories) rather than paraphrased from memory -
+see the comments directly above each shader's source in
+`switch_render.cpp` for the specific things that needed real translation
+(mainly: Cg's boolean-vector comparisons like `all(A==B)` become GLSL's
+`all(equal(A,B))`/`any(notEqual(A,B))`; Cg's `frac()` is GLSL's
+`fract()`).
+
+**Why these 4 out of a genuinely huge ecosystem** (`common-shaders` has
+~40 top-level categories - CRT variants alone number in the dozens):
+picked for being both single-pass (this renderer still has no
+render-to-texture/FBO chaining - most of that ecosystem, `scalefx` and the
+`crt-royale`/`crt-geom`/NTSC families included, is genuine multi-pass and
+stayed out of scope for the same reason the DraStic bundle's `+` combo
+presets did last pass) and for actually adding something new rather than
+overlapping what's already here:
+- **Scale2x / Scale3x** (Andrea Mazzoleni, GPL) - a much cheaper
+  alternative to 5xBR/SABR for anyone who finds those two too heavy: a
+  classic sharp, non-blurry edge-preserving upscaler, a few texture reads
+  and comparisons instead of a page of edge-detection math.
+- **Super2xSaI** (Derek Liauw Kie Fa's original algorithm, ported into
+  DOSBox by The DOSBox Team, adapted for RetroArch by "guest(r)" - all
+  GPL) - a softer, smoothing scaler, a different look from every sharp/
+  edge-preserving option already here.
+- **zfast-crt** (Greg Hogan/SoltanGris42, same author as zFast LCD above)
+  - a second, meaningfully different CRT look from D.Smile CRT's own
+    (barrel distortion + glow + RGB triad mask): this one leans on a
+    "weighted linear" resample plus a monochrome per-column aperture mask,
+    and its own header specifically advertises being cheap enough for a
+    Raspberry Pi 3 - worth having as a lighter CRT option if D.Smile CRT
+    turns out to be the wrong performance tradeoff for someone's setup.
+
+**Filtering**: Scale2x, Scale3x, and Super2xSaI all read precise neighbor
+texels the same way xBR/SABR do, so they need `GL_NEAREST` for the same
+reason (see the point_sample comment in `switch_render.cpp`). zfast-crt
+explicitly resamples through hardware bilinear (its own header calls it "a
+weighted linear filter") the same way D.Smile Sharp/CRT and Sharp Bilinear
+already do, so it uses `GL_LINEAR` like those.
+
+**Parameters baked in as fixed constants**, same treatment as the DraStic
+shaders' `#define`s: zfast-crt ships several `#pragma parameter`-tunable
+values upstream (blur amount, scanline darkness, brightness boost, mask
+strength) - this port uses their documented defaults rather than exposing
+new per-shader sliders, matching how 5xBR/SABR's own tunables were handled
+last pass.
+
+**Not attempted, same reasoning as before**: anything genuinely
+multi-pass (ScaleFX, crt-royale/crt-geom, NTSC shaders needing frame
+history, hqx's lookup-texture-based variants), and per-shader tunable
+parameters beyond the baked-in defaults above.
+
+**Hardware-untested** - all 4 need a real run, and this batch specifically
+also needs confirmation that the Cg→GLSL translation itself is correct;
+unlike the previous batch, nothing here was a mechanical rename of
+already-working GLSL, so there's more surface area for a translation
+mistake even after a careful line-by-line check. `switch_render_init()`
+still isolates a failure the same way as the previous batch - a bad
+translation that fails to *compile* would show up as that one menu entry
+falling back to D.Smile Pixel (logged), not a crash - but a translation
+that compiles fine while computing something subtly wrong wouldn't be
+caught by that safety net at all, only by actually looking at it running.
+
+## New in the previous pass: shader ports
+
+Settings > Graphics > Shader now has 14 options total (10 as of this
+section, 4 more added later - see "New this pass: more shader ports
+(libretro/common-shaders)" above): the original
+Pixel/Sharp/CRT (unchanged, just relabeled "D.Smile Pixel/Sharp/CRT" in
+the menu to read as a distinct family) plus 7 new ones - LCD1x, Sharp
+Bilinear, Linear, zFast LCD, Natural Vision, 5xBR, and SABR - ported from
+`reference/DrasticDS_nx-main/third_party/drastic-ds-shaders`.
+
+**NDS Color was dropped after the initial port** (which had 8 new ones,
+including it). It's a color-correction shader that simulates a Nintendo
+DS Phat's specific display characteristics - not something a V.Smile
+emulator has any reason to reproduce, since V.Smile hardware never had
+that display. It shipped in the same bundle purely because the bundle is
+DraStic's (a DS emulator), not because it's relevant here; everything
+else in the bundle is a general-purpose upscaler/overlay effect that
+doesn't assume DS hardware.
+
+**These aren't DraStic's own shaders, and the menu doesn't call them
+that.** They're classic shaders from the broader RetroArch/libretro
+ecosystem; jdgleaver (and, for 5xBR/SABR specifically, a second porter
+credited as "Try791023" in their own source - see below) adapted them
+*into* DraStic DS's own shader format, the same way this project just
+adapted them again into its own. The first attempt at this labeled them
+"DraStic <name>" in the menu to distinguish them from D.Smile's own 3 -
+inaccurate once the actual origin turned up, so they're shown under their
+original names instead. **This did change their `settings.ini` keys**
+(`drastic_lcd1x` → `lcd1x`, etc. - see `switch_menu.cpp`'s `kShaderKeys`)
+- a save made against the very first build with these 8 will silently
+reset to D.Smile Pixel on next load rather than error, since the old key
+just won't match anything anymore.
+
+**Why this turned out feasible rather than a rewrite**: that `.dsd` format
+looked proprietary from the file extension alone, but it's actually just
+plain GLSL ES 1.00 (`attribute`/`varying`/`gl_FragColor`, `texture2D()`) in
+a small text wrapper - the exact same dialect `switch_render.cpp` already
+writes its own shaders in. Every shader that's actually a single `<vertex>`/
+`<fragment>` pair (all of them, individually - only the bundle's `+`-joined
+combo presets like `lcd1x+natural_vision.dfx` chain multiple passes) drops
+into this project's existing one-quad-one-GL-program pipeline with a
+mechanical rename (`u_texture`→`uTex`, `a_vertex_coordinate`→`aPos`,
+`u_texture_size.zw`→`uTexSize`, etc. - see the comment above
+`kFragDrasticLcd1xSrc` in `switch_render.cpp`) rather than new rendering
+architecture. The `+` combo presets are **not** included here - they're
+genuine multi-pass chains, and this renderer has no render-to-texture/FBO
+chaining to run a second pass through, so porting those would be a real
+architecture change, not a shader port.
+
+**Why only 7 of the ~24 base shaders**: most of the bundle is the same
+xBR/SABR edge-detection algorithm at different quality/performance presets
+(Low/High/Very Low/Very High Configuration, spanning v3.5 through v4.0) -
+maintaining, and eventually hardware-testing, ~20 near-duplicates wasn't
+worth it. Picked one of each: the newest xBR (5xBR v4.0) and SABR's
+"Optimized" variant (explicitly built for a weaker mobile GPU, which a
+stock Switch's Tegra X1 also qualifies as, over the plain/lq variants)
+alongside the shaders that only exist once each and are actually relevant
+to a non-DS console - LCD1x, Sharp Bilinear, Linear, zFast LCD, and
+Natural Vision (NDS Color was in this group too, but dropped - see above).
+
+**Performance - hardware-confirmed fine**: 5xBR and SABR are both
+genuinely heavy per-pixel shaders (5xBR samples 15 neighbor texels and
+runs a page of edge-detection logic per output pixel; SABR is similar), so
+this was the real open question going in. Both run at a playable frame
+rate on real, stock (non-overclocked) hardware, paired with the frame
+skip setting already recommended for stock clocks - exactly the pairing
+expected to be necessary, and it was.
+
+**Failure isolation, since these are unverified on this GPU**:
+`switch_render_init()` still hard-fails (as before) if D.Smile's own
+Pixel/Sharp/CRT don't compile - that would mean something is fundamentally
+broken. The 7 new ones are allowed to fail individually instead (logged via
+the existing `CompileShader`/`LinkProgram` error prints); `switch_render_
+frame()` falls back to D.Smile Pixel for any shader whose program failed to
+link, rather than calling `glUseProgram(0)` and drawing nothing. So a
+driver rejecting, say, SABR's shader source would mean that one menu entry
+renders as plain nearest-neighbor pixels instead of what it's labeled -
+noticeable, but not "nothing boots."
+
+**Filtering**: 5xBR and SABR read specific neighbor texels via their own
+precise `fract()`/`floor()` math and blend them themselves - hardware
+bilinear filtering would pre-blend those samples and break the algorithm,
+so (like D.Smile Pixel) they force `GL_NEAREST`. Every other shader here,
+including Linear and Sharp Bilinear (whose whole design, per its own
+name, leans on hardware bilinear for the final blend), uses
+`GL_LINEAR` same as D.Smile Sharp/CRT already did.
+
+**Two of these needed a platform-specific tweak, not just a rename**:
+LCD1x and zFast LCD normalize their scanline-grid math against a
+`NDS_SCREEN_HEIGHT` constant compensating for DraStic's optional "high-
+resolution 3D rendering" mode (where its internal framebuffer can be a
+multiple of the DS's native size). V.Smile has no such concept - this
+core's framebuffer is always exactly `kFbW`x`kFbH` - so that compensation
+term simplifies away entirely rather than needing a DS-specific constant
+carried over; see the comments in `switch_render.cpp` right above those
+two shaders for the derivation.
+
+**Not attempted**: BIOS-side or per-shader tunable parameters (the
+originals' `#define`-configurable constants are baked in as fixed `const`
+values here, matching whichever preset - e.g. SABR's "Optimized" over
+plain v3.0 - was picked above) and the `+` combo multi-pass presets
+mentioned above.
+
+**Full credit** (GPL-2-or-later; see
+`reference/DrasticDS_nx-main/third_party/drastic-ds-shaders/COPYING` and
+`NOTICE.md`, and the main README's Acknowledgements for the summarized
+version): jdgleaver ported LCD1x (original by Gigaherz), Sharp Bilinear
+(rsn8887 & TheMaister), zFast LCD (Greg Hogan/SoltanGris42), and Natural
+Vision (ShadX, modified by Hyllian and Sp00kyFox) to DraStic's format.
+5xBR v4.0 (Hyllian/Jararaca)
+and SABR v3.0 (Joshua Street, "Optimized" variant) were ported to DraStic's
+format separately - credited in their own source files as "Try791023"
+rather than jdgleaver - and Linear is DraSticDS-nx's own small MIT-licensed
+pass-through stub, not a ported third-party shader.
+
+## New in the previous pass: zip game support
+
+Games can now be `.zip` archives (one `.bin` inside each) as well as plain
+`.bin` files, dropped into the same game folders. This started from a
+partial attempt already sitting in
+`reference/D.Smile_nx-feature-zip-game-support` (`switch/source/core/
+switch_zip.cpp`): it listed `.zip` files in the browser fine, but launching
+one silently did nothing.
+
+**The actual bug**: that version's ZIP reader only handled two cases -
+method 0 ("stored", i.e. uncompressed) and method 8 ("deflate") *but only
+when the compressed and uncompressed sizes happened to match* - with a
+`// TODO: Link zlib for proper DEFLATE decompression` where real inflation
+should have been. Every mainstream zip tool (Windows' own "Compress to zip
+file", 7-Zip's defaults, macOS Archive Utility) actually deflates its
+contents, so compressed size never equals uncompressed size and that
+branch always hit the TODO and returned false - `LoadGame()` in main.cpp
+got an empty buffer, bailed out, and the ROM list screen just... sat there,
+exactly what was reported.
+
+**The fix**: real raw-DEFLATE decompression via zlib's `inflate()`
+(`windowBits=-15` for the header-less raw stream a ZIP entry actually
+contains), plus a CRC-32 check against the entry's own stored checksum so
+a bad extraction fails loudly instead of feeding the core garbage. No new
+dependency - `switch/Makefile` already links `-lz` for libpng's sake, and
+zlib's headers come along with the same PORTLIBS include path. Rewritten
+as `switch/source/core/switch_zip.{h,cpp}`, wired into
+`switch_library.cpp` (list `.zip` files, but only ones that actually start
+with a valid ZIP local file header - `switch_zip_is_valid()`) and
+`main.cpp`'s `LoadGame()` (extract to memory before handing to
+`VSmile::LoadCart()` - the emulated cart is never read from a still-
+compressed file). Cover art, save states, rewind, and cart-side NVRAM all
+key off the game's path with its extension stripped, same as `.bin`
+always did, so none of that needed to change.
+
+**Deliberately still unsupported**: a zip whose entry uses a streamed data
+descriptor instead of writing real sizes into the local file header
+(general-purpose bit 3 - some non-seekable/streaming zip writers do this).
+Detected and rejected rather than misread; in practice this only shows up
+from unusual zip producers, not from a person just right-clicking a `.bin`
+and compressing it, so it wasn't worth the extra central-directory parsing
+this would take to fix properly. Also unchanged: BIOS selection stays
+`.bin`-only, and a zip's first `.bin` entry (by archive order) is the one
+that gets loaded if more than one is present - name a zip after the game
+you want it to contain one `.bin` in, same as before.
+
+**Not yet hardware-tested** - this needs a real run to confirm the zlib
+raw-inflate path actually behaves the same on-device as it does in theory
+(no host-side test harness covers switch/-only code like this).
+
+## New in the previous pass: header icon
+
+The game grid/list screen's header now shows a small rounded-corner copy
+of the mascot icon just to the left of the "D.Smile" title (the other
+screens' headers - Settings, Paused, etc. - are unchanged). Generated once
+from `switch/icon.jpg` (already the corrected full-bleed-square version
+from the 1.0.0 icon fix below) via a rounded-rect alpha mask, so it reads
+as the familiar rounded Android-launcher icon shape rather than the
+squared-off `.nro` icon. Baked in as a small embedded PNG byte array
+(`switch/source/render/switch_header_icon.h`) rather than a file on the SD
+card or a Makefile/romfs asset pipeline change - decoded once at
+`switch_menu_init()` with the same `stb_image` this project already links
+for cover art, so it costs nothing per frame and nothing new to ship or
+go missing. Purely cosmetic; no behavior changed.
 
 ## 1.0.0 release prep
 
@@ -1131,10 +1415,16 @@ Current mode shows in the header alongside the page indicator.
   root, Launcher, Library & Storage, Game Folders. Owns navigation
   (D-Pad/stick, L/R page, X sort, A/B/Y/+) and delegates rendering to
   `switch_chrome`/`switch_ui`, data to `switch_library`/`switch_settings`.
-- `source/core/switch_library.{h,cpp}` - **new**: the game list's data
-  model. Scans every configured folder, resolves + decodes + uploads cover
-  art, sorts per the current mode. `switch_menu.cpp` never touches the
-  filesystem or GL texture lifecycle directly anymore - this owns it.
+- `source/core/switch_library.{h,cpp}` - the game list's data model. Scans
+  every configured folder, resolves + decodes + uploads cover art, sorts
+  per the current mode. `switch_menu.cpp` never touches the filesystem or
+  GL texture lifecycle directly anymore - this owns it. Now also lists
+  `.zip` archives (validated via `switch_zip_is_valid()`) alongside `.bin`
+  files - see "New this pass: zip game support" above.
+- `source/core/switch_zip.{h,cpp}` - **new**: minimal ZIP reader, just
+  enough to pull one `.bin` out of a `.zip` (stored or deflated, via
+  zlib's raw `inflate()`) - see "New this pass: zip game support" above
+  for what it does and doesn't handle.
 - `source/core/switch_dirbrowse.{h,cpp}` - **new**: the folder-picker modal.
   Runs its own blocking input/render/present loop (nested inside
   `switch_menu_update()`'s call for "Add game folder" - the same
@@ -1162,8 +1452,13 @@ Current mode shows in the header alongside the page indicator.
   hardware.
 - `source/third_party/stb_image.{h,cpp}` - **new**: vendored from the Yokoi
   reference port unmodified. Public-domain/MIT-0, PNG-only build.
-- `source/render/switch_render.cpp`, `source/audio/`, `source/input/` - the
-  in-game bring-up pieces, unchanged.
+- `source/render/switch_header_icon.h` - **new**: the rounded-corner mascot
+  icon shown in the game grid/list header, embedded as a PNG byte array -
+  see "New this pass: header icon" above.
+- `source/render/switch_render.cpp` - the in-game renderer. Gained 8 more
+  Shader options this pass, ported from `reference/DrasticDS_nx-main`'s
+  shader bundle - see "New in the previous pass: shader ports" above.
+- `source/audio/`, `source/input/` - the in-game bring-up pieces, unchanged.
 
 ## Controls
 
@@ -1255,8 +1550,10 @@ Produces `dsmile_switch.nro` (~7.6 MB).
 
 1. Create `sdmc:/switch/dsmile/games/` (or any folder(s) you'll add via
    Settings > Library & Storage > Game folders) on the SD card.
-2. Copy V.Smile cartridge dumps there as `.bin` files. Optionally, drop a
-   same-named `.png` next to any of them for cover art.
+2. Copy V.Smile cartridge dumps there as `.bin` files, or `.zip` archives
+   each containing one `.bin` (previous pass - not yet hardware-confirmed,
+   see "New in the previous pass: zip game support" above). Optionally,
+   drop a same-named `.png` next to any of them for cover art.
 3. Optional: any `.bin` BIOS dump(s) in `sdmc:/switch/dsmile/bios/` - pick
    which one's active, and the region/language nibble, in Settings >
    Library & Storage > BIOS / Region.
@@ -1265,8 +1562,14 @@ Produces `dsmile_switch.nro` (~7.6 MB).
 
 Region's language labels, the BIOS/Region main-menu lock, the audio
 self-heal, single-player controller input, automatic two-player
-*detection*, combined Joy-Con pairs staying combined, and cart-side NVRAM
-are all hardware-confirmed working now. Two-player *crosstalk* (either
+*detection*, combined Joy-Con pairs staying combined, cart-side NVRAM, and
+the previous pass's 7 shaders (including 5xBR/SABR at a playable frame
+rate with frame skip on stock clocks - see "New in the previous pass:
+shader ports" above) are all hardware-confirmed working now. This pass's
+4 new shaders (Scale2x, Scale3x, Super2xSaI, zfast-crt), the `.zip`
+support from two passes back, and the header icon are not yet - all three
+still need a real run. Two-player
+*crosstalk* (either
 controller driving both players) is a known, accepted limitation rather
 than something still being chased - see "Two-player controller support"
 above for the full history. Worth keeping an eye on if it comes up again

@@ -1,6 +1,6 @@
 // D.Smile Switch port - main loop.
 //
-// Two states: a ROM browser (list *.bin files under
+// Two states: a ROM browser (list *.bin files and *.zip archives under
 // sdmc:/switch/dsmile/games, pick one with A) and gameplay. Single-threaded,
 // modeled on reference/Yokoi_Game_-_Watch_emulator_3ds-main's switch/source/
 // main.cpp (poll input -> step one frame -> render -> play audio -> swap),
@@ -10,6 +10,7 @@
 // pull-callback here - vsync from eglSwapBuffers paces the loop directly,
 // same as Yokoi's.
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -30,6 +31,7 @@
 #include "core/switch_menu.h"
 #include "core/switch_present.h"
 #include "core/switch_settings.h"
+#include "core/switch_zip.h"
 #include "input/switch_input.h"
 #include "render/switch_chrome.h"
 #include "render/switch_render.h"
@@ -182,14 +184,26 @@ std::string NvramFilePath(const std::string& rom_path) {
   return "sdmc:/switch/dsmile/nvram/" + base + ".nvram";
 }
 
+bool HasZipExtension(const std::string& path) {
+  if (path.size() < 4) return false;
+  std::string ext = path.substr(path.size() - 4);
+  for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+  return ext == ".zip";
+}
+
 // Loads and resets a fresh VSmile instance for `rom_path` (a fresh instance
 // per load, same as Android's jni_bridge.cpp nativeInit(), rather than
-// trying to reuse/reset one across games). Optional BIOS from
-// switch_menu_bios_path() is applied if present - not required (see
-// README.md's BIOS note), just improves compatibility on a few titles.
+// trying to reuse/reset one across games). `rom_path` may be a .bin file or
+// a .zip archive containing one (switch_zip_extract_bin() unpacks it into
+// memory first - the emulated cart is never loaded from a file still
+// sitting compressed on disk). Optional BIOS from switch_menu_bios_path()
+// is applied if present - not required (see README.md's BIOS note), just
+// improves compatibility on a few titles.
 std::unique_ptr<dsmile::VSmile> LoadGame(const std::string& rom_path) {
   std::vector<uint8_t> rom;
-  if (!LoadFile(rom_path.c_str(), rom)) return nullptr;
+  const bool ok = HasZipExtension(rom_path) ? switch_zip_extract_bin(rom_path, rom)
+                                             : LoadFile(rom_path.c_str(), rom);
+  if (!ok) return nullptr;
 
   auto vs = std::make_unique<dsmile::VSmile>();
   if (!vs->LoadCart(rom.data(), rom.size())) return nullptr;

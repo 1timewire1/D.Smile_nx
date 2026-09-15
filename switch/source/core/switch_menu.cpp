@@ -11,14 +11,18 @@
 
 #include <switch.h>
 
+#include <glad/glad.h>
+
 #include "input/switch_input.h"
 #include "render/switch_chrome.h"
+#include "render/switch_header_icon.h"
 #include "render/switch_ui.h"
 #include "switch_dirbrowse.h"
 #include "switch_frameskip.h"
 #include "switch_library.h"
 #include "switch_present.h"
 #include "switch_settings.h"
+#include "third_party/stb_image.h"
 
 namespace {
 
@@ -29,6 +33,39 @@ namespace {
 constexpr int kViewportW = 1280, kViewportH = 720;
 
 constexpr const char* kBiosDir = "sdmc:/switch/dsmile/bios";
+
+// The small rounded-corner mascot icon shown next to "D.Smile" in the game
+// grid/list header (see switch_header_icon.h). Decoded once at init - same
+// GL upload switch_library.cpp's cover art uses - rather than every frame.
+GLuint g_header_icon_tex = 0;
+
+void LoadHeaderIconTexture() {
+  int w = 0, h = 0, channels = 0;
+  stbi_uc* pixels =
+      stbi_load_from_memory(kHeaderIconPng, (int)kHeaderIconPngSize, &w, &h, &channels, 4);
+  if (!pixels) return;
+
+  glGenTextures(1, &g_header_icon_tex);
+  glBindTexture(GL_TEXTURE_2D, g_header_icon_tex);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+  stbi_image_free(pixels);
+}
+
+// Draws the header icon left of the header band's title text, vertically
+// centered in it - in the margin before kChromeListLeft, so it doesn't
+// require shifting the title itself or touching switch_chrome.cpp (every
+// other screen's header keeps that margin empty today).
+constexpr float kHeaderIconSize = 56.0f;
+void DrawHeaderIcon() {
+  if (!g_header_icon_tex) return;
+  const float x = kChromeListLeft - kHeaderIconSize - 16.0f;
+  const float y = ((float)kChromeHeaderH - kHeaderIconSize) * 0.5f;
+  switch_ui_draw_texture(g_header_icon_tex, x, y, kHeaderIconSize, kHeaderIconSize);
+}
 
 enum class Screen {
   GameGrid,
@@ -87,8 +124,38 @@ int ThemeIndex(const std::string& key) {
 // what's shown on screen. Ported 1:1 from Android's ShaderMode/AspectMode/
 // BackgroundMode/BezelMode enums (GameRenderer.kt) and the main README's
 // "Look" feature list.
-constexpr const char* kShaderKeys[] = {"pixel", "sharp", "crt"};
-constexpr const char* kShaderNames[] = {"Pixel", "Sharp", "CRT"};
+// The first 3 keys/names are unchanged from before the shader-port pass
+// (existing settings.ini files keep working) - only their *displayed*
+// names gained the "D.Smile " prefix, since those 3 genuinely are this
+// project's own. The other 7 are ported from reference/DrasticDS_nx-main's
+// third_party/drastic-ds-shaders (see switch_render.cpp's own comment by
+// their fragment shader sources, and switch/README.md, for exactly what
+// was and wasn't portable and full authorship/license credit) - kept under
+// their own original RetroArch/libretro-ecosystem names rather than a
+// "DraStic " prefix, since DraStic didn't originate them, it only ported
+// them (by jdgleaver, or "Try791023" for 5xBR/SABR specifically) into its
+// own shader format the same way this project just ported them again.
+// NDS Color (a DS-Phat display color-correction shader) was dropped after
+// the initial port - correcting for a display this emulator has no reason
+// to simulate isn't useful just because the shader happened to ship in
+// the same bundle; see switch/README.md for the removal note.
+// The last 4 (Scale2x, Scale3x, Super2xSaI, zfast-crt) are a second batch,
+// from libretro/common-shaders directly rather than through DraStic's port
+// of a subset of it - see switch/README.md's "New this pass" section for
+// this batch for exactly why those 4 and not others from that much larger
+// ecosystem (it's genuinely huge; most of it needs multi-pass rendering
+// this project's renderer doesn't have, or is a close variant of an effect
+// already covered above).
+constexpr const char* kShaderKeys[] = {
+    "pixel", "sharp", "crt", "lcd1x", "sharp_bilinear", "linear", "zfast_lcd",
+    "natural_vision", "5xbr", "sabr", "scale2x", "scale3x", "super2xsai", "zfast_crt",
+};
+constexpr const char* kShaderNames[] = {
+    "D.Smile Pixel", "D.Smile Sharp", "D.Smile CRT", "LCD1x", "Sharp Bilinear",
+    "Linear", "zFast LCD", "Natural Vision", "5xBR", "SABR", "Scale2x", "Scale3x",
+    "Super2xSaI", "zfast-crt",
+};
+constexpr int kShaderCount = 14;
 constexpr const char* kAspectKeys[] = {"four_three", "stretch", "integer"};
 constexpr const char* kAspectNames[] = {"4:3", "Stretch", "Integer"};
 constexpr const char* kBackgroundKeys[] = {"black", "blue", "purple"};
@@ -314,6 +381,7 @@ void RenderGameListView(int viewport_w, int viewport_h, const std::vector<Librar
   char ctx[64];
   snprintf(ctx, sizeof(ctx), "%d / %d    Sort: %s", g_grid_sel + 1, n, SortName(g_settings.sort_mode));
   switch_chrome_draw_header(viewport_w, "D.Smile", ctx);
+  DrawHeaderIcon();
 
   switch_chrome_draw_row_list(viewport_w, viewport_h, n, g_grid_sel, &g_list_scroll, &g_highlight_y,
                                [&](int i, std::string& label, std::string&) {
@@ -334,6 +402,7 @@ void RenderGameGridView(int viewport_w, int viewport_h, const std::vector<Librar
   snprintf(ctx, sizeof(ctx), "%d / %d    Page %d/%d    Sort: %s", g_grid_sel + 1, n, page + 1, pages,
            SortName(g_settings.sort_mode));
   switch_chrome_draw_header(viewport_w, "D.Smile", ctx);
+  DrawHeaderIcon();
 
   const float grid_left = kChromeListLeft;
   const float grid_top = kChromeListTop;
@@ -401,6 +470,7 @@ void RenderGameGrid(int viewport_w, int viewport_h) {
   const auto& games = switch_library_games();
   if (games.empty()) {
     switch_chrome_draw_header(viewport_w, "D.Smile");
+    DrawHeaderIcon();
     const float list_w = switch_chrome_list_width(viewport_w);
     switch_ui_draw_rect(kChromeListLeft, kChromeListTop, list_w, kChromeRowHeight * 3.0f,
                          g_col_panel.r, g_col_panel.g, g_col_panel.b, g_col_panel.a);
@@ -606,7 +676,7 @@ std::string GraphicsRowValue(GraphicsRow r) {
       return v;
     }
     case GX_FRAMESKIP_AMOUNT: return std::to_string(g_settings.frame_skip_manual);
-    case GX_SHADER: return kShaderNames[OptionIndex(kShaderKeys, kOptionCount3, g_settings.shader_mode)];
+    case GX_SHADER: return kShaderNames[OptionIndex(kShaderKeys, kShaderCount, g_settings.shader_mode)];
     case GX_ASPECT: return kAspectNames[OptionIndex(kAspectKeys, kOptionCount3, g_settings.aspect_mode)];
     case GX_BACKGROUND:
       return kBackgroundNames[OptionIndex(kBackgroundKeys, kOptionCount3, g_settings.background_mode)];
@@ -801,9 +871,16 @@ void switch_menu_init() {
   switch_settings_load();
   switch_chrome_set_theme(g_settings.theme);
   switch_library_rescan();
+  LoadHeaderIconTexture();
 }
 
-void switch_menu_shutdown() { switch_library_shutdown(); }
+void switch_menu_shutdown() {
+  switch_library_shutdown();
+  if (g_header_icon_tex) {
+    glDeleteTextures(1, &g_header_icon_tex);
+    g_header_icon_tex = 0;
+  }
+}
 
 void switch_menu_enter_pause() {
   g_screen = Screen::InGamePause;
@@ -959,8 +1036,8 @@ MenuAction switch_menu_update(uint64_t k_down, uint64_t /*k_held*/, std::string&
             break;
           case GX_SHADER: {
             const int idx =
-                (OptionIndex(kShaderKeys, kOptionCount3, g_settings.shader_mode) + dir + kOptionCount3) %
-                kOptionCount3;
+                (OptionIndex(kShaderKeys, kShaderCount, g_settings.shader_mode) + dir + kShaderCount) %
+                kShaderCount;
             g_settings.shader_mode = kShaderKeys[idx];
             break;
           }

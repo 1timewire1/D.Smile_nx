@@ -126,6 +126,26 @@ This project wouldn't exist without the V.Smile reverse engineering work that ca
   emulator core in a native Switch homebrew shell. At least one concrete fix
   (dropping a broken controller-pairing applet for automatic detection) came
   directly from checking how NetherSX2_nx handled the same problem.
+- **The DraStic DS shader bundle** (GPL-2-or-later; preserved in
+  `reference/DrasticDS_nx-main/third_party/drastic-ds-shaders`) — 7 of the
+  Switch port's Shader options are ported from this collection. **jdgleaver**
+  adapted LCD1x (original by **Gigaherz**), Sharp Bilinear (**rsn8887** &
+  **TheMaister**), zFast LCD (**Greg Hogan/SoltanGris42**), and Natural
+  Vision (**ShadX**, modified by **Hyllian** and **Sp00kyFox**) into
+  DraStic's shader format; 5xBR v4.0 (**Hyllian/Jararaca**) and SABR v3.0
+  (**Joshua Street**) were ported separately, credited in their own source
+  as **Try791023**. See [switch/README.md](switch/README.md)'s "New in the
+  previous pass: shader ports" for exactly what was portable and why.
+- **[libretro/common-shaders](https://github.com/libretro/common-shaders)**
+  (GPL-2-or-later) — 4 more Shader options, ported directly from this repo
+  rather than through DraStic's bundle. **Andrea Mazzoleni** wrote Scale2x
+  and Scale3x; Super2xSaI is **Derek Liauw Kie Fa**'s original algorithm as
+  ported into DOSBox by **The DOSBox Team** and adapted for RetroArch by
+  **"guest(r)"**; zfast-crt is **Greg Hogan/SoltanGris42**'s (same author
+  as zFast LCD above). Unlike the DraStic bundle, this repo's shaders are
+  written in Cg, not GLSL - see [switch/README.md](switch/README.md)'s "New
+  this pass: more shader ports (libretro/common-shaders)" for what that
+  meant for the port.
 - The V.Smile research and homebrew community, whose compatibility testing and
   hardware documentation made a project like this possible.
 

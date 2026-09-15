@@ -47,8 +47,17 @@ struct SwitchSettings {
   SortMode sort_mode = SortMode::Alpha;
 
   // Graphics - mirrors Android GameRenderer.kt's options (see the main
-  // README's "Look" feature list) and VSmile::SetAccurate().
-  std::string shader_mode = "sharp";        // pixel|sharp|crt
+  // README's "Look" feature list) and VSmile::SetAccurate(). shader_mode's
+  // first 3 values (pixel|sharp|crt, shown in Settings as "D.Smile
+  // Pixel/Sharp/CRT") are this project's own; the other 11 are ported
+  // single-pass shaders from the RetroArch/libretro ecosystem (7 via
+  // reference/DrasticDS_nx-main's bundle, 4 more via libretro/common-
+  // shaders directly), shown under their original upstream names rather
+  // than any "D.Smile "/"DraStic " prefix. See switch_menu.cpp's
+  // kShaderKeys/kShaderNames for the full current list (it's changed more
+  // than once - don't assume this comment enumerates it) and
+  // switch_render.cpp for the actual shaders and full attribution.
+  std::string shader_mode = "sharp";
   std::string aspect_mode = "four_three";   // four_three|stretch|integer
   std::string background_mode = "black";    // black|blue|purple
   std::string bezel_mode = "none";          // none|silver|black
