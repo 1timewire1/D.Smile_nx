@@ -131,6 +131,10 @@ class Emulator {
           // any controller re-sync and never depend on a UI event arriving.
           const u64 in = input_state_.load();
           vs_->SetInput((s16)(in >> 48), (s16)(in >> 32), (u32)(in & 0xFFFFFFFF));
+          // Standby (the core now really sleeps - games turn themselves off
+          // after a long idle spell): Android has no ON button, so any
+          // input presses it.
+          vs_->SetConsoleButtons(vs_->Sleeping() && in != 0, false, false);
           vs_->RunFrame();
           if (++rewind_push_counter >= 1) {
             rewind_push_counter = 0;

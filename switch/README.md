@@ -1,38 +1,73 @@
 # D.Smile - Switch port (bring-up)
 
+**1.1.0** (`Makefile` `APP_VERSION`). Everything since 1.0.1, each detailed
+in its own section below:
+- **Peripherals:** the Smart Keyboard (USB keyboard), the V.Smile Motion
+  (tilt/swing/shake from the Switch controller's sensors, one or two
+  players), and the Jammin' Gym Class dance mat.
+- **Joystick:** analog stick levels.
+- **Power:** real standby, with Console ON/OFF/RESTART bindings, Reset Game
+  as RESTART, and Quit as a power-off that's kept for the next launch.
+- **Console options:** PAL/NTSC, the VTech-logo jumper, a controller LED
+  overlay, BIOS-only boot and the BIOS test screen, and the corrected
+  Motion console type.
+- **Save states:** they now carry the console's configuration.
+
 **Prepping for a 1.0.0 release** - not code-untested, still needs the
 two-player work above to get a hardware round, but the theme/branding
 work in "1.0.0 release prep" below is done. Build's `.nro` metadata now
 reads `D.Smile NX` by `SenseiFromClubPenguin`, version `1.0.0`. Also did a
 documentation-only pass on several other V.Smile peripherals this port
 doesn't support (microphone, Smartbook, PC Pal's keyboard/mouse/
-digitizer, V.Link, plus a Jammin' Gym Class dance mat finding that turned
-out to need no work at all) - see "Documented for later: other V.Smile
+digitizer, V.Link, plus a Jammin' Gym Class dance mat finding, since
+corrected and implemented) - see "Documented for later: other V.Smile
 peripherals" below; nothing here changes any actual behavior.
 
-**This pass**: 4 more Shader options - Scale2x, Scale3x, Super2xSaI, and
-zfast-crt - ported this time from `libretro/common-shaders` directly
-rather than through DraStic's bundle, since that ecosystem is much bigger
-than the one DraStic happened to carry a slice of. See "New this pass:
-more shader ports (libretro/common-shaders)" below for why those 4 out of
-that much larger set, and an important caveat this batch has that the
-previous one didn't: that repo is Cg, not GLSL, so this is a hand
-translation verified line-by-line against the original rather than a
-mechanical rename. **Hardware-untested** - all 4 need a real run,
-including confirming the Cg→GLSL translation didn't introduce a subtle
-bug the build alone can't catch (no GLSL compiler runs until the Switch's
-own GPU driver does, at launch).
+**This pass, part 7** (hardware-tested fix + save-state change): turning the
+console off with the OFF binding and then choosing Quit woke it back up
+(intro and all) before quitting. Fixed, and save states now keep the console
+configuration they were made on. See "Power buttons and standby" > "Fixes
+after hardware testing".
 
-**Previous pass**: 7 Shader options, ported from
-`reference/DrasticDS_nx-main`'s bundled shader collection - see "New in
-the previous pass: shader ports" below for exactly which ones, why those
-7 specifically, and why they're shown under their original RetroArch/
-libretro names (LCD1x, Sharp Bilinear, etc.) rather than the "DraStic
-<name>" labels a first attempt used, which turned out to misattribute
-them. Hardware-confirmed working, including the two heaviest (5xBR, SABR)
-at a playable frame rate on stock clocks - paired with the frame skip
-setting already recommended for stock, non-overclocked hardware, as
-expected going in.
+**This pass, part 6**: power buttons and real standby. Console ON / OFF /
+RESTART are bindable. Reset Game presses RESTART. Quit turns the console off
+(the goodbye plays) and keeps its standby state, so the next launch resumes
+as if the cartridge never left. See "Power buttons and standby" below.
+Checked on the harness, **hardware-untested**.
+
+**This pass, part 5**: the console-type straps and the US Motion BIOS. See
+"Console type straps, and why the US Motion BIOS shows the V.Smile intro"
+below. Checked on the harness, **hardware-untested**.
+
+**This pass, part 4**: veesem's remaining console options. Settings >
+Library & Storage gets **Video Timing** (NTSC 60 Hz / PAL 50 Hz) and **VTech
+Logo** (the jumper that skips it). Settings > Graphics gets **Controller LEDs**.
+Checked on the harness, **hardware-untested**. See "New this pass: veesem's
+options (PAL, logo jumper, LEDs)" below.
+
+**This pass, part 3**: three quick items, each checked on the desktop harness,
+**hardware-untested**: the Jammin' Gym Class dance mat as a controller type,
+analog stick levels, and booting the BIOS on its own, including its hidden
+test screen. See "New this pass: dance mat, stick levels, BIOS test screen"
+below.
+
+**This pass, part 2**: V.Smile Motion controller support. Motion carts now
+offer their Standard/Motion choice, and tilting the Switch controller steers,
+tested on PC with Action Mania. See "New this pass: V.Smile Motion controller
+(tilt)" below. **Hardware-untested.**
+
+**This pass**: V.Smile Smart Keyboard support using a USB keyboard
+plugged into the Switch (Settings > Controller > Controller Type).
+**Hardware-confirmed**: keyboard detected, login-screen typing and the
+Enter/Esc/F1 keys all work. Follow-up in the same pass (hardware-untested):
+the keyboard's colour buttons and ABC (F5-F9), a Spanish layout, the
+language setting renamed "Keyboard Layout", and the French/German/Spanish
+carts checked on PC. See "New this pass: Smart Keyboard (USB keyboard)"
+below.
+
+**Previous pass**: separate button bindings for player 2 and BIOS version
+detection (see "New in the previous pass: player 2 bindings and BIOS
+version detection" below). Hardware-confirmed working.
 
 Status: the original bring-up, the ROM browser/BIOS pass, the menu redesign,
 Graphics settings, Controller settings, the settings-screen scrolling fix,
@@ -70,21 +105,641 @@ that never actually displayed (`LibnxError_LibAppletBadExit`, replaced
 with an automatic-detection approach with no applet at all, found by
 checking `reference/NetherSX2_nx-main`, a second homebrew emulator with
 working multiplayer, at the user's suggestion), and a Joy-Con-pair-
-splitting regression from the first attempt at fixing the next bug. That
-next bug - **two controllers connected produces full crosstalk, either one
-driving both players** - was never resolved with the same confidence as
-the other three. **Shipping with it as a known limitation rather than
-continuing to chase it**: V.Smile's own two-player games are turn-based/
-alternating rather than simultaneous, so this doesn't block actually
-playing them, just means both players currently share unrestricted access
-to both controllers rather than each being confined to their own. Full
-history, including why the manual **Players** setting turned out to be
-both redundant and not actually a fix for this, in "Two-player controller
-support" below. Testing also surfaced that V.Smile Art Studio expects a
-digitizer/pen input this port doesn't have yet - noted, not investigated
-further this pass (see its own section below).
+splitting regression from the first attempt at fixing what looked like a
+fourth bug. **That fourth "bug" - either controller driving both players -
+turned out not to be a bug at all**: the game used to test it is a
+turn-taking title that deliberately accepts input from either controller.
+Retested with games that have proper simultaneous two-player, both
+controllers stay cleanly separated, and with only one controller
+connected those two-player modes are correctly gated out. Two-player
+support works as intended; see "Two-player controller support" below for
+the full history. Testing also confirmed that V.Smile Art Studio is fully
+playable with the standard controller - the drawing pad itself isn't
+emulated yet (see its own section below).
 
-## New this pass: more shader ports (libretro/common-shaders)
+## Noted for later (skipped as low value)
+
+- **FPS counter overlay**: veesem's `-fps`. Cheap (`switch_ui_draw_text`
+  over the frame, like the LED overlay), but not needed so far.
+- **IOC6 audio-output enable**: the wiki's "IOC6: audio output enable"
+  (port C bit 6 shunts the whole audio output). The core ignores port C bit 6
+  writes. Honouring it would only matter if a game deliberately mutes
+  output, and none is known to.
+
+## Power buttons and standby
+
+**How the real console turns off.** Both power buttons are just inputs to the
+SoC (port B: IOB6 ON, IOB7 OFF, both active low).
+- On OFF, the game plays its goodbye clip, then copies a few instructions into
+  RAM and runs them. They set the wakeup source (`3D29 = 0x80`, key change),
+  the wakeup time (`3D2A = 0xC8`), and write `0xAA55` to `3D28`.
+- That write **halts the CPU**: standby. RAM stays powered, which is how games
+  "remember your place" (Smart Keyboard manual).
+- On wakeup the CPU carries on after that write. The RAM code jumps to the
+  cart's wakeup vector (`0xFFF6`), which re-initialises the hardware and
+  resumes from RAM.
+- The v1.03 BIOS disassembly (`reference/vsmile_disassembly`) shows the same
+  sequence in the BIOS itself (`sleepmode_microcode`, `WAKEUP_handler`).
+
+Our core used to ignore `3D28`, so a game "woke" the instant it slept and
+simply rebooted. veesem does the same. Now `Spg200` really sleeps:
+- The CPU is halted and the screen goes black.
+- A change on the console-button pins wakes it (key-change source), and the
+  2 Hz source is honoured too.
+- The state is saved in save states (version 9).
+
+**RESTART is a hardware reset.** The manuals:
+- The original V.Smile has separate ON, OFF and RESTART buttons: "RESTART:
+  press this button when the unit is ON, to start the game over from the
+  beginning".
+- The Writing Pad model, the Motion and the PC Pal have one **ON/RESTART**
+  button: "If you press the ON/RESTART Button while playing a game, the game
+  will start over from the beginning".
+
+The Motion schematic (rendered with PyMuPDF) shows how:
+- The front-panel connector (CON5 "ON-OFF") carries only OFF, GND and START.
+- The old ON-driving circuit is marked "REMOVE 'ON' CIRCUIT", with every part
+  "NC".
+- The "new reset circuit" wires START straight onto `/RST` (D4 "short").
+- IOB3 "RESTART" goes only to test point TP3.
+
+Little Einsteins confirms games don't rely on IOB3: its button handler only
+acts on it on a Motion-type board. So RESTART is emulated as a **hardware
+reset that keeps RAM** (`VSmile::Restart()`), not a power-on.
+- Pressed mid-game, the game starts over.
+- Pressed in standby, it wakes the console, as the Motion's single button does.
+- On the harness, Smart Keyboard offers **Continue Game** after either.
+
+**What the Switch port does:**
+- **Settings > Controller: Console ON / Console OFF / Console RESTART.**
+  Bindable, unbound by default. ON and OFF are held while the button is;
+  RESTART fires once per press.
+- **Pause menu > Reset Game** presses RESTART, in place of the old cold reset.
+- **Pause menu > Quit** turns the console off:
+  - The game keeps running with OFF pressed (pads released) until it enters
+    standby, so the goodbye plays. On the harness this takes 0.25-2.5 s:
+    Scooby-Doo 15 frames, Thomas 55, Smart Keyboard 60, Little Einsteins 80,
+    Up 150.
+  - The whole console state is then saved to
+    `sdmc:/switch/dsmile/standby/<game>.dss` and you're back at the grid.
+  - If a game never sleeps within 10 s, Quit gives up and no standby is kept.
+- **Next launch of that game** loads the standby state (still asleep), presses
+  ON, and deletes the file, since the state is used once like the RAM it
+  stands for.
+  - Quitting any other way (L+R+Plus, HOME) boots cold next time, like pulling
+    the cartridge without pressing OFF.
+  - A standby from an older build fails the version check and boots cold.
+  - Booting the BIOS alone never keeps one.
+- **Turned off mid-game with the OFF binding:** the screen says "The V.Smile is
+  off". ON wakes it, or Enter if ON isn't bound, or Reset Game.
+
+**Fixes after hardware testing.**
+- *OFF binding, then Quit, turned the console back on.* Quit pressed OFF,
+  and standby woke on any console-button change. Now standby wakes only on
+  a fresh press of ON (IOB6), and Quit on a console that's already off just
+  keeps that standby and leaves.
+- *Save states and changed settings.* A save state and a standby file are
+  the same thing: one full core state. Neither held the console's
+  configuration, which comes from settings at launch. On the harness,
+  Smart Keyboard states made on v1.03 were loaded under v1.00, v1.02, v1.03,
+  both Motion BIOSes, the French BIOS and no BIOS:
+  - Standby states resumed with Continue Game under all seven.
+  - Mid-game states worked under every standard BIOS and with no BIOS, but
+    restarted the game under either Motion BIOS. The cause is the console
+    type flipping to Motion under a running game, not the BIOS: v1.03 with
+    the Motion type also restarts, and a Motion BIOS with the standard type
+    doesn't.
+  - States taken during the BIOS intro carry on into whichever BIOS is now
+    loaded, and stay black with none.
+
+  So states are now **v10**: they store the console type, Region code and
+  VTech-logo jumper, and loading restores them. `ApplyPortDevices()` now
+  applies the console type only at launch or when the Controller Type
+  setting actually changes, instead of every frame. Loading a state also
+  sets the PAL/NTSC frame pacing from the state. After this, mid-game v10
+  states carry on under both Motion BIOSes. The BIOS image itself isn't
+  stored (it's a 2 MB file the user supplies). Swapping it only matters for
+  a state saved mid-intro, and removing it entirely leaves such a state
+  black until Reset Game.
+- *Android.* The core now really sleeps, and games also turn themselves off
+  after a long idle spell (the BIOS has an "Auto Shut-off" message). The
+  Android app has no ON button, so in standby any input presses ON
+  (`jni_bridge.cpp`). This was compile-checked for the core with the NDK
+  only; Oboe's headers come from the Gradle build.
+
+**Why a full state rather than just RAM.** The console's RAM is only 10K words,
+but resuming also needs the sleeping CPU and the code it's halted in, the
+cart's bank/extmem setup, and the controller link. A save state already holds
+all of that exactly, and taking it while asleep means nothing is mid-flight.
+Waking still goes through the game's own wakeup code, as on hardware.
+
+**Checked on the harness:**
+- **Standby round trip:** Smart Keyboard, Cyber Adventure started, OFF, then
+  standby saved. In a fresh process the state loads asleep, ON is pressed,
+  and Adventure Play offers **New Game / Continue Game**. A cold boot goes
+  straight to the level settings.
+- **Cold boots:** all 41 carts in `reference/roms` still boot normally,
+  without falling asleep.
+
+## Console type straps, and why the US Motion BIOS shows the V.Smile intro
+
+**The US Motion BIOS is v1.03.** `vmotionbios.bin` (CRC `427087ea`, "Motion
+(US unit)") matches the standard v1.03 BIOS word for word. The only
+difference is a `078800VER0` tag in its first 10 words, which the CPU can
+never read (internal RAM shadows them). `0788` is that console's FCC ID and
+PCB code (MAME: FCC ID 62R-0788, PCB 35-078800-001). MAME's own note says the
+dump "doesn't show the 'Motion' logo at all, but was dumped from a Motion
+unit". So the standard V.Smile intro is authentic for that console, and no
+jumper changes it: the Motion animation isn't in that BIOS. Only the Spanish
+dump (`vsmilemotion.bin`) has it. On the harness the US BIOS gives the V.Smile
+intro under all 16 region codes and all console types.
+
+It's now identified as "Motion (US unit, v1.03)":
+- Region shows v1.03's labels rather than the Motion list.
+- The BIOS test screen row appears for it; its test screen works.
+- It still selects the Motion console, since it came from one.
+
+**Console type (port A IOA14/IOA15).** The wiki's `io` page, from the Motion
+schematics:
+
+| Console | IOA14 | IOA15 |
+|---|---|---|
+| V.Smile, V.Smile Pocket | 0 | x |
+| V.Smile Motion | 1 | 0 |
+| Cyber Pocket | 1 | 1 |
+
+We returned MAME's `0xC000` for the Motion console, which by this table is the
+Cyber Pocket. The core now has `VSmile::SetConsoleType()` (Standard / Motion /
+CyberPocket), and Motion returns `0x4000`. This is harmless either way, from
+disassembling every Motion cart's port A reads:
+- Most (Action Mania, Pooh, Up, Little Einsteins, Scooby-Doo, Thomas,
+  Spider-Man) only test IOA14.
+- A shared routine (at `0xB9C8` in most carts, `0x41101F` in Shrek) sorts
+  `0x4000`/`0x8000` as the Motion console and `0` as the original. `0xC000`
+  becomes a third type (presumably the Cyber Pocket's handheld mode) when
+  **IOC5** (`3D0B` bit 5, port C) is high. Our core drives IOC5 high, so
+  with the old value Shrek (and any cart using this routine) took that third
+  path. It now takes the Motion path, as a real Motion console would.
+  *(Corrected: this first said IOB5 and "harmless"; `3D0B` is port C.)*
+
+Neither BIOS changes its intro with the console type.
+
+**Other jumpers.** Tried on the harness with no visible effect: IOC5 low (the
+wiki's "maybe LCD/TV detection") and the Cyber Pocket console type. So nothing
+else is worth exposing. The two useful ones, Region and the VTech logo, are
+already settings.
+
+## New this pass: veesem's options (PAL, logo jumper, LEDs)
+
+veesem (github.com/sp1187/veesem, archived) has three console options this
+port didn't expose. The core already supported all three; they just weren't
+reachable from the Switch UI.
+
+**Video Timing (Library & Storage).** NTSC (default) or PAL. PAL is the
+core's 312-line, 50 Hz mode (`VSmile::Reset(pal)`; the PPU reports it at
+`0x2B`).
+- The Switch display is 60 Hz, so `main.cpp` runs 5 emulated frames per 6
+  refreshes. Each refresh adds 5 credits and each shown frame costs 6; a
+  refresh with no credit shows the previous frame again.
+- Frames that frame skip doesn't render aren't charged, since they don't
+  wait for vsync. Frame skip's per-frame budget becomes 20 ms.
+- Audio needs nothing: the resampler works at a fixed 281250 to 48000 Hz
+  ratio, so 50 longer frames a second come out at the right pitch.
+- On the harness, Little Einsteins boots and reaches its menu under PAL.
+
+This is mostly useful with a PAL BIOS and European carts; US carts run too.
+Applies at launch, like Region.
+
+**VTech Logo (Library & Storage).** The Port C bit 4 jumper. Hidden skips the
+BIOS intro's blue VTech logo and starts straight at the V.Smile animation
+(checked on the harness). The cart's own intro is unaffected. Applies at
+launch.
+
+**Controller LEDs (Graphics).** Draws the four colour-button lights as small
+squares in the bottom-left corner, dim when off. There's a second row when
+player 2 is connected.
+- The console sets the lights with `6x` bytes (bit 0 green, 1 blue, 2 yellow,
+  3 red, as veesem has them).
+- Games light a button when it's pressed, as feedback. Not every game does:
+  on the harness Up and Little Einsteins lit Red and Blue on those presses,
+  while Scooby-Doo and Thomas never touched the LEDs.
+
+**Everything else in veesem was checked against our core.** Its v0.2 changelog
+fixes (MULS FIR_MOV, blending over transparent pixels, blended sprites in
+depth-layer order, the SPU's wave-in mix, the watchdog) are all already in
+`app/src/main/cpp/core`. So are its Port C/ADC details (full battery `3FF`,
+UART lines idle high) and region notes. Its remaining features are desktop
+debug UI (a memory editor, SPU visualizer), an FPS counter, and
+F1/F2/F3 = console ON/OFF/RESTART, which belongs to the power-off work.
+
+## New this pass: dance mat, stick levels, BIOS test screen
+
+**Dance mat (Jammin' Gym Class).** Settings > Controller > Controller Type >
+**Dance Mat (Gym Class)**, for player 1 and player 2 (the game's two-player
+mode needs a mat on each port). The mat keeps the joystick's protocol and its
+`55` ID but sends different bytes: its Right arrow is the pad's "left,
+level 3" byte, Yellow is "left, level 1", and so on (table in
+`reference/findings.md` §0; MAME `mat.cpp`). So a normal pad can't play
+mat games. `VSmileJoy::QueueMatUpdates()` sends the mat's bytes, with the
+pad's inputs mapped one to one onto the mat's 3x3 grid plus its buttons:
+
+| Mat | Pad input |
+|---|---|
+| Up / Down / Left / Right arrows | stick or D-Pad |
+| Red / Yellow / Blue / Green footprints (corners) | the Red / Yellow / Blue / Green buttons |
+| Centre panel | ABC |
+| Enter / Exit / Help | Enter / Exit / Help |
+
+Checked with the US cart on the harness:
+- "Pick Your Athlete": the mat's Right arrow changes the athlete. A joystick's
+  right does nothing, which confirms the game needs the mat.
+- Main menu: the Red/Yellow/Blue footprints open Gym Games, Brain Games and
+  Music Box. Green highlights Options, and Enter opens it. The Options screen
+  shows the manual's layout (red 1 player, yellow 2 players, blue easy, green
+  difficult).
+- The BIOS test screen (below) shows each panel arriving as the byte in the
+  MAME/wiki table.
+
+**Analog stick levels.** The V.Smile joystick reports 5 levels per direction.
+The left stick now maps its deflection onto them: nothing inside 20%, full
+tilt from 85% out (so a diagonal still reaches level 4), evenly spaced in
+between. The D-Pad is always full tilt. The BIOS test screen reads 3..7 for
+levels 1..5, and on the harness levels 1, 3 and 4 read back as 3, 5 and 6.
+Games that only check for "any tilt" behave as before; games that use the
+level (e.g. for movement speed) now get partial tilt.
+
+**Booting the BIOS alone and its test screen.** Settings > Library & Storage
+now has **Boot BIOS (no cartridge)** and **BIOS test screen** under the BIOS
+row. They only appear when a BIOS is present, and the test-screen row is
+hidden for the Motion BIOS, which has none.
+- An empty slot makes the BIOS answer at every bank (MAME's `banked_map`), so
+  the BIOS is loaded 4x mirrored as the "cart". It then shows its own
+  insert-a-cartridge screen.
+- The test screen holds ON + OFF + RESET (all active low) for the first second,
+  then releases them. KanedaFr's procedure: the BIOS checks them in its first
+  ticks.
+- It shows "Main Unit Test Program": BIOS version, language, the two ROM
+  checksums, the power (battery ADC) reading, and a live test of controller A's
+  stick and buttons. On the harness v1.03 reads checksums DA64/DA64 and v1.00
+  reads 8F05/2F61.
+- Earlier, holding the buttons with a cart inserted did nothing: the cart's own
+  code runs instead, which is why it has to be the BIOS alone.
+- The test screen's "ON key" switches it to stick B. ON/OFF aren't bound to any
+  Switch button yet (that's the power-off work).
+
+## New this pass: V.Smile Motion controller (tilt)
+
+**Using it.** Settings > Controller, Player 1, **Controller Type** now cycles
+Joystick → Smart Keyboard (USB) → **Motion Controller (tilt)**. With it
+selected, Motion carts offer their Standard/Motion choice (the "1P" screen
+with the Motion controller and joystick pictures), and in Motion mode tilting
+the Switch controller left/right is read by the game. The pad's stick and
+buttons keep working as usual. It uses the accelerometer of player 1's
+controller: the console itself in handheld mode, a Pro Controller, or the left
+Joy-Con of a pair.
+
+**Why it never worked before - two separate gates, both now handled:**
+1. **The controller has to identify itself.** Each controller's keep-alive
+   byte is its device ID: `55` joystick, `52` Smart Keyboard hello, **`56`
+   Motion controller**. Games map the ID to a "device type" (Action Mania's
+   library function at `0x43EA5`; `56` → type 7) and only show the
+   Standard/Motion screen for type 7.
+2. **The game also checks the console.** Choosing Motion silently fell back
+   to Standard until the core reported the **V.Smile Motion board's port A
+   pins**: IOA14/IOA15 high (`0xC000`, same as MAME's `vsmilem` driver). The
+   check is Action Mania's `0x5608C`. `VSmile::SetMotionConsole()` models it;
+   the Switch build turns it on when a Motion BIOS is loaded or the Motion
+   controller is selected. The in-game tell: the icon at the start of Rapid
+   Race shows the Motion controller held upright (as in real footage)
+   instead of the joystick.
+
+**Protocol** (from Action Mania's controller library; `PortDevice::Motion`
+in `vsmile.*`):
+- The console sends `05` when a Motion controller appears.
+- `8n` sets the report mode (0 = off). The controller must answer `Dn`, or
+  the game resends it forever. Menus ask for mode 0; Rapid Race asks for
+  mode 2.
+- `9n` sends a 4-bit setting (default `F`; meaning unknown, no reply needed).
+- While a mode is on, the controller streams reports. Modes 1/2 send `43 X Y Z`,
+  one raw byte per axis. Modes 3/4 send `43` plus four 6-bit bytes packing
+  the same 24 bits, with X and Z inverted. Modes 3/4 are implemented from the
+  code but untested.
+- Axis bytes: `80` = 0g, about `40` per g, so level and still is
+  `80 80 C0`. **X is left/right tilt**, higher = right. Rapid Race steers on
+  it, with a dead zone of about ±`10` (roughly 15°).
+- The console withholds CTS for long spells while it sends its own commands.
+  Our 0.5 s no-grant timeout drops a half-sent report rather than
+  interleaving a `56`, and the next report realigns the game's parser.
+
+**Steadiness filter: a still controller now reads still.** Hardware testing
+of Shrek Forever After's Bowling Bonanza: holding the controller still threw
+the ball; only setting it down stopped it. On the desktop harness, steady
+readings never throw, nor does a single step change (even of 8). But a change
+of **1** that returns a quarter second later throws, and so does a drift of
++1 per second. So the game treats any small "movement" as a throw, and a real
+controller held still must report constant values. A hand-held Switch
+controller never does: sensor noise, tremor, and a few degrees of slow
+wander. `switch_input.cpp` now smooths each axis and only moves the reported
+value once the smoothed reading is 8 units (about 7°) away from the last one.
+In simulated tremor plus a ±4-unit drift, a deadband of 6 still threw; 8 held
+steady; deliberate swings and tilts still threw. Rapid Race's own steering
+dead zone is 16, so steering is unaffected.
+
+**Steadiness filter, v2: gyro-gated.** Hardware testing showed the deadband
+fixed Shrek but made Spider-Man & Friends: Secret Missions need extreme
+motions in every mode. On the harness, Safari Showdown ignores held tilts
+entirely (even ±64, i.e. 90°) and reacts to shakes. A sideways shake of ±32
+does nothing, while ±48 makes Spider-Man run. The old filter's smoothing and
+deadband cut a real ±0.75 g shake below that threshold. The filter now:
+- Decides whether the controller is **moving**. That is true when the gyro
+  (smoothed so 10 Hz hand tremor averages out) reads over 20°/s, or when the
+  lightly smoothed accelerometer departs quickly from its slow average (over
+  6 units), which catches sideways shakes that barely rotate.
+- While moving, and for 8 frames after, passes the raw readings through
+  untouched.
+- While still, holds the last value. A slow tilt still gets through once the
+  slow average is 8 units away.
+
+Checked on the harness with a simulated hand (roll/pitch tremor at about
+10 Hz plus a ±3° wander, accelerometer and gyro noise), fed through a Python copy
+of the filter:
+- In Shrek's Bowling Bonanza, a still hand, even with 1° of tremor, doesn't
+  throw, and neither does the old filter. A quick swing throws. Raw
+  unfiltered input throws, which shows the test is sensitive.
+- In Safari Showdown, a ±0.75 g shake makes Spider-Man run through the new
+  filter but not through the old one, matching the hardware report.
+
+One assumption: libnx doesn't document the gyro's units. The code assumes
+the SDK convention of 1.0 = 360°/s, one revolution per second. If that's
+wrong, the 20°/s threshold is off by the same factor.
+
+**Axis fix: forward/back tilt was inverted.** Hardware testing in
+Spider-Man & Friends: Secret Missions (Safari Showdown's tree: "tilt forward
+to climb up") needed the opposite tilt. The real controller behaves as a
+gravity sensor with x right, y toward the player, z down. That fits both
+known facts: tilting right raises x, and level reads +1g on z. So tipping the
+top away lowers y. The Switch's y axis points the other way, so
+`switch_input.cpp` now negates it; x and z were already right.
+
+**Two Motion controllers (player 2).** Settings > Controller, switch Player
+to **Player 2**: a **Controller Type** row (Joystick / Motion Controller
+(tilt)) now appears there too. The Smart Keyboard stays player 1 only. On
+the real console each wireless controller has an OFF/P1/P2 switch, and its
+single receiver presents them to the SoC as ordinary ports 1 and 2. So a
+second Motion controller is just a Motion device on port 2
+(`VSmile::SetPort2Device()`/`SetMotion2()`), with its own ID, modes and
+reports. The game's library already handles both ports (Action Mania's port-2
+path runs its own mode acks and reports, confirmed with watch hooks).
+Player 2's tilt comes from controller slot 2's sensor (Pro Controller, or the
+left Joy-Con of a pair).
+
+Found while testing two players with Shrek Forever After (its 2-player
+option shows a "switch controller 2 to P2" screen until a second controller
+answers). With two streaming Motion controllers, player 1's menu presses got
+lost:
+- **Queued input was flushed on timeouts.** When the console pauses
+  servicing (screen loads, its own commands), a controller gives up after
+  0.5 s. That flushed queued button events, and then assumed "nothing
+  pressed". Now a Motion controller drops only its stale report and ID
+  bytes and keeps button events queued in order. Any controller that does
+  flush re-sends its full current state next time, so a lost release can no
+  longer leave a button stuck (a latent joystick bug too).
+- **Too much traffic for the console's controller servicing.** With two
+  Motion controllers, each now reports every 80 ms instead of 40 ms, and
+  re-sends its ID every 1 s instead of 250 ms. Every `56` makes the console
+  repeat its Motion setup.
+
+Result: Shrek's two-player flow accepts both players (Character Selection
+shows P1 and P2, and P2's OK registers). Player 1's menu input with a second
+Motion controller matches the joystick-on-port-2 baseline: selecting "2
+players" worked in 4 of 6 runs at different timings for both, and every run
+accepted the OK. The misses are the test script racing the screen. Single
+controller behaviour is unchanged. A "turn-taking" scheduler between the two
+ports was tried and removed; it cut each port to about 2.6 reports a second.
+
+**Fixed after the first hardware round: garbage input and false
+disconnects.** The first build sent reports every 33 ms regardless of line
+activity. On hardware, after a while, input went strange, the controller
+dropped out, and Toy Story 3 switched to the writing-pad controller. Found and
+reproduced on PC with long random-tilt sessions. The cause is a chain:
+1. The console can only send its own commands while our RTS is idle.
+   Reports back to back starved it.
+2. Separately, the game's disconnect check has a race (Action Mania
+   `0x88F3`: "now − last seen", read across an interrupt that stamps a newer
+   time and so goes negative). A report arriving at just the wrong moment
+   triggers a false disconnect.
+3. After a disconnect the game resets the port, and every report byte is
+   parsed as an ordinary pad byte. `5x` values become a new device ID (`50`/
+   `51` = the writing-pad controller, `52` = keyboard). `Cx`/`8x` look like
+   the stick, `9x`/`Ax` like buttons. Nothing re-identified the controller,
+   because the `56` keep-alive never fires while streaming.
+
+Now:
+- Reports wait for 40 ms of idle line, about 19 per second.
+- The `56` ID is re-sent every 250 ms while streaming.
+- A report still waiting to go out is dropped when an `8n` arrives.
+- Reports pause for 30 ms after a console `05`.
+
+Over eight random-tilt sessions of about 3 minutes each: before, 16 wrong
+IDs in one session and they never stopped. Now, 3 false disconnects and 1
+wrong ID in total. Each recovered on its own after about 2 seconds (the
+console's own cool-down before it serves the port again). A 20 ms gap gave 12
+disconnects, so the rate stays at 40 ms. The race is in the game code, so it
+presumably exists on real hardware too.
+
+**Tested on PC** (`test/keyboard_test.cpp`, `mot` device and
+`<frame>:tilt<x>,<y>,<z>` events), Action Mania (USA) with the US Motion BIOS:
+- The Standard/Motion screen appears, and picking Motion gives the Motion icon.
+- Steering: X `98` → car moves right, `60` → left, `80` → keeps its lane.
+  It holds up across a minute of racing with direction changes.
+- Up (Motion) and a non-Motion Scooby-Doo still boot and take input normally
+  with the Motion controller.
+
+**Not verified yet:**
+- On Switch hardware: which way is "right" on the Switch accelerometer. If
+  steering is mirrored, the X sign needs flipping (one line in
+  `switch_input_poll_motion()`).
+- Which physical motions the other minigames want (forward/back tilt,
+  swings), and whether Y/Z map to them.
+- Report modes 3/4.
+- The Motion controller on port 2.
+
+## New this pass: Smart Keyboard (USB keyboard)
+
+**Using it.** Settings > Controller, Player 1, **Controller Type** row:
+Left/Right or A toggles between **Joystick** and **Smart Keyboard (USB)**.
+With the keyboard selected, a **Keyboard Layout** row appears: English
+(US), English (UK), French (AZERTY), German (QWERTZ), Spanish. **Set it to
+match your USB keyboard**, whichever cart you play. It's the language byte
+the keyboard sends at power-up, and every Smart Keyboard cart tested (US,
+French, German, Spanish) switches its whole typing layout to follow it.
+So with it matching your keyboard, the character on screen is the one
+printed on the key you pressed. Plug a USB keyboard into the dock or a
+USB-C adapter. The setting takes effect immediately, including from the
+pause menu mid-game (port 1 is "re-plugged"; tested working), but choosing
+it before launching the game is the natural way.
+
+With the keyboard selected, port 1 is the Smart Keyboard, not a joystick,
+same as real hardware where the keyboard plugs in instead of the pad. The
+Switch pad still works as the keyboard's own joystick ball (D-Pad/stick)
+and its buttons (your normal bindings). The real keyboard has all of the
+pad's buttons: four colour buttons, and Help / Exit / ABC buttons at the
+top right. Player 2 is unaffected.
+
+**Key layout** (by physical position - USB keyboards report positions,
+not characters, so an AZERTY or QWERTZ keyboard lines up with the French or
+German Smart Keyboard the same way QWERTY does with the US one):
+
+| Smart Keyboard | USB keyboard |
+|---|---|
+| Letters, digits, Space, Shift, Caps, Backspace, arrows | the same keys |
+| OK (Enter) / Exit / Help | Enter / Esc / F1 |
+| Player 1 / Player 2 / Symbol | F2 / F3 / F4 (or keypad 1 / 2 / +) |
+| Red / Yellow / Blue / Green | F5 / F6 / F7 / F8 |
+| ABC | F9 |
+| Typing Time | Tab |
+| Erase | Delete (or `]`) |
+| the key right of P (US: `/ ?`) | `[` (or `/`) |
+| the key right of 0 (US: `- +`) | `-` |
+
+The arrow keys navigate the carts' menus, so a USB keyboard alone is
+enough; the pad isn't required.
+
+**Carts.** In `reference/roms/`, identified against MAME's
+`hash/vsmile_cart.xml`:
+- **Smart Keyboard carts:** Smart Keyboard (USA), Clavier Tip Tap (France),
+  Schreibspaß (Germany), Teclado Interactivo (Spain).
+- **PC Pal carts, not Smart Keyboard** (despite the file names): PC Pal
+  Island (USA), Mes premiers clics (France), Mein erster Mausklick
+  (Germany), "V.Smile - PC" (Spain). They need PC Pal's infrared
+  keyboard/mouse, which isn't emulated.
+- MAME marks the Spanish Smart Keyboard cart unsupported, since it has no
+  Spanish keyboard.
+
+**How it works.** Core side (`app/src/main/cpp/core/vsmile.*`), port 1's
+`VSmileJoy` gains a `PortDevice::SmartKeyboard` mode reusing all of the
+existing UART/RTS/CTS plumbing. Protocol from the vtech.pulkomandy.tk
+wiki's logic-analyzer captures and MAME's `bus/vsmile/keyboard.cpp`, which
+agree:
+- Power-up: every 300 ms raise RTS for 12.2 ms; if the console selects the
+  port, send `52 52 52`. The console answers `02 02 E6 D6 60`, the keyboard
+  replies with its language byte (`40` US), then it's the usual `55`
+  keep-alives and `7x`/`Bx` probe replies.
+- Keys send their code on press and `code | C0` on release; Shift is
+  `A9`/`AA`. OK/Quit/Help/ABC are `A1`/`A2`/`A3`/`A4`, `A0` when released.
+  The keyboard's joystick uses `87`/`8F`/`80` (up/down/centre) and
+  `7F`/`77`/`70` (left/right/centre).
+- Colour buttons send the joystick's `9x` byte. Neither source documents
+  them (MAME's keyboard has none), but the wiki keeps key codes out of the
+  `90`-`AF` range for the shared buttons, and the cart accepts them: red
+  skips Cyber Adventure's intro exactly as it does from a joystick.
+- Language bytes: `40` US, `41` UK, `42` French, `44` German (wiki), and
+  **`43` Spanish** (not on the wiki; found by testing the Spanish cart).
+- The console's UART output now reaches both ports and each device decides
+  whether it cares (`VSmileJoy::Rx(byte, selected)`), like MAME: the
+  keyboard must hear the handshake bytes even when not selected. The
+  joystick still ignores anything it isn't selected for, so its behaviour
+  is unchanged.
+- Save states bumped to version 7 (the port's device and keyboard state).
+  Older states still load, as a joystick.
+
+Switch side: `switch_input_poll_keyboard()` (`hidInitializeKeyboard()` +
+`hidGetKeyboardStates()`) diffs the USB keyboard each frame into key
+events, sending Shift presses first and Shift releases last so a fast
+Shift+letter still arrives as a capital. `main.cpp` feeds the events to
+`VSmile::KeyboardKey()` and calls `SetPort1Device()` every frame (a no-op
+unless the setting changed).
+
+**Tested on PC** with `test/keyboard_test.cpp` (scriptable: key presses,
+pad input, device swaps and screenshots at given frames), the real
+`Smart Keyboard (USA)` cart and the v1.03 BIOS:
+- The handshake trace matches the wiki's capture byte for byte, and the
+  console keeps the keyboard alive (probe replies checked against MAME's
+  formula).
+- Title screen and main menu reached; the keyboard's joystick moves the
+  menu cursor; OK enters Computer Zone's login screen.
+- Typing into the NAME field: "abcde", "yellow", doubled letters ("lla",
+  "aab", "kka"), Backspace, Shift+H gives "H", Caps Lock gives capitals.
+- Swapping joystick → keyboard mid-game and then typing works.
+- Typing "hello" shows "helo": every byte reaches the console (checked in
+  the trace), and "yellow" and other doubled letters work, so this is the
+  game refusing the word "hell" (a kids'-game word filter), not a dropped
+  key.
+- Arrow keys move the menu cursor; the colour buttons from the keyboard
+  work (see above).
+- Layouts, typing the same eight key positions (Q, W, Y, Z, `;`, `-`, `[`,
+  A) into each cart's login field:
+  - French cart, `42`: **azywm)^q** (AZERTY).
+  - German cart, `44`: **qwzyöß**; "üab" typed separately. That field
+    holds only 6 characters.
+  - Spanish cart, `43`: **qwyzñ-á** (the `[` position is the accent dead
+    key).
+  - French, German and Spanish carts with `40`: **qwyz;-/a**, the US
+    layout.
+  - US cart, `41` vs `40`: Shift+2 / Shift+3 give **" £** vs **@ #**.
+- The US key right of P is `/` (Shift `?`), matching a photo of the real
+  keyboard. MAME's key table labels it `'`, which is wrong.
+
+Hardware-confirmed: USB keyboard detection, typing and the Enter/Esc/F1
+keys. Not yet hardware-tested: F5-F9 (colours/ABC) and the non-US layouts.
+
+## New in the previous pass: player 2 bindings and BIOS version detection
+
+**Player 2 bindings.** Settings > Controller now starts with an
+"Player" row - press A or Left/Right on it to switch between Player 1 and
+Player 2. Player 2's list is only the 8 V.Smile buttons (Enter, Exit,
+Help, ABC and the four colours); the hotkeys (save/load state, rewind,
+menu) stay player 1's, since `main.cpp` only ever reads them from player
+1's controller. Player 2's layout starts out identical to player 1's
+defaults, is saved under its own `bind2_*` keys in `settings.ini`, and
+keeps the same "one button, one action" rule within its own list. The
+"Press a button to bind" prompt accepts the press from either controller,
+so one person can set up both without handing controllers back and forth.
+Nothing changes when only one controller is connected.
+
+**BIOS version detection.** New `core/switch_bios.{h,cpp}` identifies a
+BIOS file by CRC-32 against the five known dumps (MAME's v1.00, v1.02,
+v1.03, and the two Motion dumps - from a Spanish and a US unit) *and*
+against byte-swapped copies of each. It's used in three places:
+- The Library & Storage BIOS row and the BIOS picker show the version,
+  e.g. `vsmile_v103.bin (v1.03)`, `vsmilebios.bin (v1.02, byte-swapped)`,
+  or `(unrecognized)`.
+- The Region row's label follows the detected version (see "Region labels
+  per BIOS version" below). The code is now shown in hex (`A`-`F` rather
+  than `10`-`15`) to match that table.
+- `main.cpp` un-swaps a known byte-swapped dump before handing it to the
+  core, so `vsmilebios.bin` from `reference/bios/` now boots as v1.02
+  instead of feeding the CPU scrambled instructions.
+
+None of the dumps contain a readable version string, so the CRC is the
+only reliable signal; an unrecognized dump gets version-neutral labels.
+
+### Region labels per BIOS version
+
+Source: the community wiki's hardware-tested table (vtech.pulkomandy.tk,
+page `io`, "Configuration" - documented by veesem's author in 2025; see
+`reference/findings.md` §9). It supersedes the standard-BIOS half of the
+MAME-derived table in "Region mapping" below. The Motion BIOS keeps MAME's
+labels - the wiki doesn't cover it.
+
+| Code | v1.00 | v1.02 | v1.03 |
+|---|---|---|---|
+| 0, 1 | English (US) | No boot screen | No boot screen |
+| 2 | English (US) | English (UK, no subtitle) | **Italian** |
+| 3 | English (US) | English (US, no subtitle) | same |
+| 4 | English (US) | English (US, alt. subtitle "TV Learning System") | same |
+| 5 | English (US) | English (US, no "V.Smile!" clip) | same |
+| 6 | English (US) | English (UK, no "V.Smile!" clip) | same |
+| 7 / 8 / 9 | Chinese / Portuguese / Dutch (?) | same | same |
+| A | Italian | Italian | **English (UK, no subtitle)** |
+| B / C / D / E / F | German / Spanish / French / English (UK) / English (US) | same | same |
+
+On v1.00, codes 0-5 also show a blinking blue VTech logo when no cartridge
+is inserted - never visible here, since this port always has a cart
+loaded. An unrecognized standard BIOS (or none) shows "Italian or English
+(UK)" for 2 and A, and the v1.02+ labels for 0-6.
+
+## New in the previous pass: more shader ports (libretro/common-shaders)
 
 Settings > Graphics > Shader gained 4 more options this pass - Scale2x,
 Scale3x, Super2xSaI, and zfast-crt - bringing the total to 14. Same idea
@@ -153,7 +808,8 @@ multi-pass (ScaleFX, crt-royale/crt-geom, NTSC shaders needing frame
 history, hqx's lookup-texture-based variants), and per-shader tunable
 parameters beyond the baked-in defaults above.
 
-**Hardware-untested** - all 4 need a real run, and this batch specifically
+**Update: hardware-confirmed working**, translation included. Original
+note: **Hardware-untested** - all 4 need a real run, and this batch specifically
 also needs confirmation that the Cg→GLSL translation itself is correct;
 unlike the previous batch, nothing here was a mechanical rename of
 already-working GLSL, so there's more surface area for a translation
@@ -167,8 +823,8 @@ caught by that safety net at all, only by actually looking at it running.
 ## New in the previous pass: shader ports
 
 Settings > Graphics > Shader now has 14 options total (10 as of this
-section, 4 more added later - see "New this pass: more shader ports
-(libretro/common-shaders)" above): the original
+section, 4 more added later - see "New in the previous pass: more shader
+ports (libretro/common-shaders)" above): the original
 Pixel/Sharp/CRT (unchanged, just relabeled "D.Smile Pixel/Sharp/CRT" in
 the menu to read as a distinct family) plus 7 new ones - LCD1x, Sharp
 Bilinear, Linear, zFast LCD, Natural Vision, 5xBR, and SABR - ported from
@@ -521,7 +1177,17 @@ overlay) and it's automatically in as player 2; disconnect it and the port
 goes back to empty. No applet, no setting, no `LibAppletBadExit` risk, one
 less screen to navigate.
 
-### Crosstalk: either controller could drive both players
+### "Crosstalk": either controller could drive both players - resolved, not a bug
+
+**Resolution (after 1.0.1):** this was the test game, not the emulator.
+The title used for these rounds only has players taking turns, and it
+intentionally accepts input from either controller port. Games with real
+simultaneous two-player keep the two controllers cleanly separated, and
+with only one Switch controller connected their two-player modes are
+correctly unavailable. No code change needed; the history below is kept
+because the three genuine fixes it produced (the `UartRxDone()`
+regression, the pairing applet, and Single-vs-Dual assignment mode) are
+all still real.
 
 Third hardware round, with detection itself finally working: both
 controllers connected produced full crosstalk - pressing a button on
@@ -595,23 +1261,14 @@ no direct evidence the old version was ever crosstalk-free; it's more
 likely the crosstalk was already present and simply never got far enough
 to be seen.
 
-**Decision: ship with this as a known limitation rather than keep
-chasing it.** Three real fixes landed from this investigation (the
-`UartRxDone()` regression, the pairing applet's `LibAppletBadExit`, and
-the Single-vs-Dual assignment-mode regression), each backed by an actual
-mechanism found in libnx's own source - but the root cause of the
-underlying crosstalk itself was never pinned down with the same
-confidence, and further guessing without hardware access to reproduce it
-directly doesn't seem like a good use of time against a 1.0.0 release.
-Two controllers connected currently means *either one* can drive *both*
-V.Smile players, rather than a clean 1:1 split - not desirable, but fully
-functional for the common case: V.Smile's own two-player games are
-turn-based/alternating rather than simultaneous-split-screen, so this
-doesn't block actually playing them. Worth revisiting post-1.0.0 with a
-fresh angle - most likely candidate for next time: whether the Switch's
-own Controllers menu (HOME overlay, pre-assigning player numbers *before*
-launching the app, entirely outside this port's own code) produces a
-clean split where in-app assignment-mode calls alone haven't.
+**Original decision (at 1.0.0): ship with this as a known limitation.**
+The root cause couldn't be found - and in hindsight that's because there
+wasn't one in this port: see the resolution note at the top of this
+section. The other community-documented detail that fits this is that the
+V.Smile has a single UART shared by both controller ports, and each game's
+own code decides which port to listen to (see
+`reference/findings.md` §3) - so a turn-taking game reading both ports is
+ordinary game behavior, not a hardware or emulation fault.
 
 ## New this pass: cart-side NVRAM saves
 
@@ -664,6 +1321,10 @@ read/written at the cart's bank-2 address window (`spg200.cpp`'s
 
 ## Noted, not implemented: ABC/Smart Keyboard accessory
 
+**Superseded** - implemented with a physical USB keyboard instead of the
+`swkbd` idea below; see "New this pass: Smart Keyboard (USB keyboard)"
+above. Kept for history.
+
 MAME's controller slot list also offers three regional ABC/Smart Keyboard
 accessories (`smartkb_us`/`_fr`/`_ge`, `src/devices/bus/vsmile/
 keyboard.cpp`) for the handful of games bundled with one. One idea floated
@@ -706,9 +1367,16 @@ there either, only `joy`/`mat`/`smartkb_*`. Same situation as the Motion
 wand: no reference implementation anywhere to check against for either
 variant, so this would be new protocol reverse-engineering, not a port.
 Noting it here so it isn't lost, per request - not investigated further
-this pass. Worth knowing: this means Art Studio's load/save loop (cart
-selection, NVRAM persistence) is confirmed working, but the actual
-drawing gameplay most likely isn't usable yet without this input.
+this pass.
+
+**Update:** Art Studio is fully playable with the standard controller -
+drawing included - both in this port and on real hardware (the chat
+research in `reference/findings.md` §2 has an owner confirming the same on
+a real console). So the drawing pad is a "nicer input" feature, not a
+blocker. The goal if this is ever picked up: drive either pad from the
+Switch touch screen. What's still missing is the protocol - nobody has
+captured the tablet's or writing pad's traffic (the chat's closest attempt
+saw console→tablet bytes but never tablet→console).
 
 ## Documented for later: other V.Smile peripherals
 
@@ -744,7 +1412,10 @@ kind of touch-surface-plus-pen mechanism as the Art Studio tablet
 digitizer above - if either is ever reverse-engineered, the other is
 worth revisiting with whatever was learned.
 
-**Jammin' Gym Class (dance mat) - confirmed to need no extra work.**
+**Jammin' Gym Class (dance mat)** - *superseded: the conclusion below was
+wrong (see `reference/findings.md` §0); the mat sends different bytes and is
+now its own controller type, see "New this pass: dance mat, stick levels,
+BIOS test screen".* Original note:
 Checked MAME's `bus/vsmile/mat.h`/`mat.cpp`: `vsmile_mat_device` is
 built on the *exact* same protocol as the standard pad
 (`vsmile_pad_device`, the one this port already implements), just with
@@ -982,10 +1653,15 @@ driver, not an omission here.
 
 The Library & Storage Region row now shows the actual language name next
 to the number (`switch_menu.cpp`'s `RegionLabel()`), not just the raw
-nibble - and picks the right table automatically, by checking the active
-BIOS file's CRC-32 against the two known Motion dumps' hashes
-(`kMotionBiosCrc`) rather than guessing from the filename, which the user
-could rename to anything.
+nibble - and picks the right table automatically from the active BIOS
+file's CRC-32 rather than guessing from the filename, which the user could
+rename to anything.
+
+**Superseded (later pass):** the standard-BIOS table above is MAME's, and
+it turned out to be right only for v1.03 - see "Region labels per BIOS
+version" under "New this pass: player 2 bindings and BIOS version
+detection" for the per-version table now in use. The Motion table above
+is still current.
 
 **A second, unrelated finding from the same investigation**: of the 8 BIOS
 files dropped into `reference/bios/`, CRC-32 hashing showed `bios
@@ -1000,11 +1676,9 @@ it produces an exact match for `vsmile_v102.bin` - it's **v102 stored in
 the opposite word-endianness** from what `VSmile::LoadSysrom()` expects
 (`data[i*2] | (data[i*2+1]<<8)`, little-endian words). Loading
 `vsmilebios.bin` as-is would feed the interpreter scrambled instructions -
-likely a hang, crash, or garbage screen, not just a wrong language. Worth
-deleting it or byte-swapping it before use; a correctly-ordered copy of the
-same firmware already exists as `sysrom_france.bin`/`vsmile_v102.bin`, so
-there's no need to fix it separately unless the goal is specifically having
-a correctly-ordered `vsmilebios.bin` on disk.
+likely a hang, crash, or garbage screen, not just a wrong language.
+**Now handled automatically** (later pass): known byte-swapped dumps are
+detected by CRC and un-swapped at load - see `core/switch_bios.cpp`.
 
 ## Fast Forward: tried and removed
 
@@ -1472,8 +2146,10 @@ triggers Rescan; Left/Right on Region adjusts it. BIOS and Region only
 appear here when reached from the main grid, not from the in-game pause
 menu's Settings (see "New in the previous pass: BIOS and Region locked to
 the main menu" above). Game Folders: Up/Down + A adds (opens the directory
-browser) or removes a folder. Controller is entirely per-action button
-binding now - no Players setting; a second controller being connected is
+browser) or removes a folder. Controller: Player row switches between
+player 1's and player 2's bindings; player 1 also has Controller Type
+(Joystick / Smart Keyboard (USB)) and, for the keyboard, Keyboard
+Language. No Players setting; a second controller being connected is
 what "2 players" means, checked live every frame during gameplay (see
 "Two-player controller support: the `UartRxDone()` regression, and
 dropping the pairing applet" above). Pair one via the system's own
@@ -1494,6 +2170,13 @@ no Fast Forward - built, hardware-tested, and removed; see "Fast Forward:
 tried and removed" above. Holding **L+R+Plus** is still a hard shortcut
 straight back to the game grid, bypassing the pause menu entirely (useful
 if Menu itself is unbound).
+
+**Smart Keyboard** (Controller Type set to the keyboard): type on a USB
+keyboard; Enter/Esc/F1 are OK/Quit/Help, F2/F3/F4 are Player 1/Player
+2/Symbol, F5-F8 are Red/Yellow/Blue/Green, F9 is ABC, Tab is Typing Time,
+Delete is Erase. Set Keyboard Layout to match your USB keyboard. The pad stays the
+keyboard's joystick and OK/Quit/Help. See "New this pass: Smart Keyboard
+(USB keyboard)" above.
 
 **Pause menu**: Up/Down to move, **A** to select, **B** resumes directly
 (same as selecting Resume).
@@ -1563,25 +2246,23 @@ Produces `dsmile_switch.nro` (~7.6 MB).
 Region's language labels, the BIOS/Region main-menu lock, the audio
 self-heal, single-player controller input, automatic two-player
 *detection*, combined Joy-Con pairs staying combined, cart-side NVRAM, and
-the previous pass's 7 shaders (including 5xBR/SABR at a playable frame
-rate with frame skip on stock clocks - see "New in the previous pass:
-shader ports" above) are all hardware-confirmed working now. This pass's
-4 new shaders (Scale2x, Scale3x, Super2xSaI, zfast-crt), the `.zip`
-support from two passes back, and the header icon are not yet - all three
-still need a real run. Two-player
-*crosstalk* (either
-controller driving both players) is a known, accepted limitation rather
-than something still being chased - see "Two-player controller support"
-above for the full history. Worth keeping an eye on if it comes up again
-anyway:
+all 11 ported shaders (including 5xBR/SABR at a playable frame rate with
+frame skip on stock clocks), `.zip` games, the header icon, player 2
+bindings and BIOS version detection are all hardware-confirmed working now.
+The Smart Keyboard (USB keyboard detection, typing, Enter/Esc/F1) is
+hardware-confirmed too. Not yet tested: its follow-up - F5-F8 colours
+(red skips Cyber Adventure's intro), F9 ABC, and a non-US Keyboard Layout
+if a matching keyboard is available.
+Two-player separation is confirmed working too -
+the earlier "crosstalk" was a turn-taking test game that reads both ports
+on purpose (see "Two-player controller support" above). Still worth
+checking if it comes up:
 
 1. **Unplugging player 2 mid-session** - does play continue normally as
    solely player 1 rather than anything getting stuck or crashing. Not
    specifically tested yet.
-2. If Pro Controllers or other USB controllers are ever tried, worth
-   noting whether the crosstalk behaves the same as with two Joy-Con
-   pairs (the only setup tested so far) or differently - not required
-   before 1.0.0, just useful data if it happens to come up.
+2. Two-player with Pro Controllers or other USB controllers - only two
+   combined Joy-Con pairs have been tested so far.
 
 ## What's still missing
 
@@ -1593,35 +2274,22 @@ Controller is wired to something real. What's left below is polish and
 robustness rather than a missing feature, roughly in the order it's worth
 tackling next:
 
-1. **V.Smile Art Studio's digitizer/pen** - confirmed needed (drawing
-   itself doesn't work without it, though cart loading/NVRAM saving both
-   do), no reference implementation anywhere to check against (see "Noted,
-   not implemented: V.Smile Art Studio's digitizer/pen" above) - noted for
-   later, not investigated further this pass.
+1. **Touch-screen drawing pad** - Art Studio is fully playable with the
+   standard controller already (cart loading, drawing, and NVRAM saving
+   all work), but emulating the drawing tablet or the writing-pad
+   controller via the Switch touch screen would be much nicer. Blocked on
+   the fact that nobody has ever captured either device's protocol (see
+   "Noted, not implemented: V.Smile Art Studio's digitizer/pen" above and
+   `reference/findings.md` §2).
 2. **A reusable confirm-prompt screen** - once built, covers every
    "no confirmation dialog" gap below in one pass instead of one-off fixes.
-3. **ABC/Smart Keyboard accessory support** - deliberately left as a
-   documented idea rather than attempted, pending resolving whether
-   `swkbd`'s whole-string input model can be translated into the
-   accessory's real one-keystroke-at-a-time protocol at all - see "Noted,
-   not implemented: ABC/Smart Keyboard accessory" above. Lowest priority
-   of everything here; very few titles used either accessory.
+3. ~~ABC/Smart Keyboard accessory support~~ - done this pass with a USB
+   keyboard (see "New this pass: Smart Keyboard (USB keyboard)" above).
+   Hardware-confirmed.
 
-Known, accepted limitation (not blocking 1.0.0): **two-player crosstalk**
-- with two controllers connected, either one currently drives both V.Smile
-players rather than each being confined to its own. Detection, combined
-Joy-Con pairs staying combined, and everything else about two-player
-support is confirmed working - see "Two-player controller support" above
-for the full four-round investigation, including three other bugs that
-*were* found and fixed along the way. Since V.Smile's own two-player games
-are turn-based/alternating rather than simultaneous, this doesn't block
-actually playing them. Worth a fresh look post-1.0.0, most likely starting
-from whether pre-assigning player numbers via the Switch's own Controllers
-menu (outside this port's own code entirely) produces a clean split where
-in-app assignment-mode calls alone haven't.
-
-Done: two-player controller support (crosstalk aside - see the known
-limitation above) and cart-side NVRAM saves, both found by checking
+Done: two-player controller support (confirmed working, including clean
+separation in simultaneous two-player games) and cart-side NVRAM saves,
+both found by checking
 MAME's V.Smile Motion driver for wand/motion-controller support (which
 turned out not to exist there either - see "V.Smile Motion investigation"
 above) and porting the two gaps that investigation surfaced instead (see

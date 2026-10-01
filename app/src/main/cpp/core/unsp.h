@@ -5,6 +5,13 @@ namespace dsmile {
 
 class Spg200;
 
+#ifdef DSMILE_TEST_HOOKS
+extern u32 g_test_watch_pc[16];  // desktop experiments: print registers when PC hits these
+extern int g_test_watch_count;
+extern int g_test_watch_mem;
+extern int g_test_watch_bpoff;  // >= 0: also print [bp+off], [bp+off+1]  // >= 0: also print 4 words from here
+#endif
+
 // SunPlus unSP 16-bit CPU (ISA 1.0/1.1 + a few 1.2 ops), word-addressed 22-bit space.
 class UnSP {
  public:
@@ -19,6 +26,8 @@ class UnSP {
   void SetFiq(bool state) { fiq_signal_ = state; }
 
   u16 GetDs() const { return (r_[6] >> 10) & 0x3F; }
+  // Current CS:PC, for trace output (points just past the executing instruction).
+  u32 DebugPc() const { return CsPc(); }
   void SetDs(u16 v) { r_[6] = (r_[6] & 0x03FF) | ((v & 0x3F) << 10); }
 
   void SaveState(struct StateWriter& w) const;

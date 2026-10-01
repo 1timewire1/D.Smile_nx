@@ -17,6 +17,7 @@ void switch_menu_shutdown();
 enum class MenuAction {
   None,
   LaunchGame,   // out_path is set
+  LaunchBios,   // out_path is the BIOS file; out_slot 1 = hold ON+OFF+RESTART for its test screen
   Quit,         // + pressed at the game grid (top level): quit to hbmenu
   ResumeGame,   // in-game pause menu: close it, keep playing
   ResetGame,    // in-game pause menu: reset the running game, keep playing

@@ -34,8 +34,19 @@ enum class GameAction {
   LoadState,
   Rewind,
   Menu,
+  // The console's own buttons (unbound by default). ON wakes the console
+  // from standby; OFF starts the game's goodbye-then-standby; RESTART is the
+  // hardware reset line (VSmile::Restart()). See switch/README.md's
+  // "Power buttons and standby".
+  PowerOn,
+  PowerOff,
+  Restart,
 };
-constexpr int kGameActionCount = 12;
+constexpr int kGameActionCount = 15;
+// The first 8 GameActions (Enter..Green) are the V.Smile controller's own
+// buttons - the only ones player 2 has separate bindings for. The hotkeys
+// after them (save/load state, rewind, menu, console buttons) are player 1's only.
+constexpr int kVsmileButtonCount = 8;
 
 struct SwitchSettings {
   bool ui_animations = true;
@@ -63,6 +74,9 @@ struct SwitchSettings {
   std::string bezel_mode = "none";          // none|silver|black
   float crt_curve = 1.0f, crt_glow = 1.0f, crt_scan = 1.0f, crt_mask = 1.0f, crt_vignette = 1.0f;
   bool accurate_renderer = false;
+  // Draws the controller's four colour-button lights (the console's 6x
+  // commands) as an overlay in the corner, like veesem's -leds.
+  bool show_leds = false;
 
   // Frame skip (see switch_frameskip.h) - MAME-style: off|auto|manual. In
   // "manual", frame_skip_manual (0-10, matching MAME's own frameskip range)
@@ -87,14 +101,19 @@ struct SwitchSettings {
   // chip is fitted, which is also why swapping BIOS *files* alone doesn't
   // change the language: this code was never set anywhere in the app (not
   // here, not Android) before now, so it was always stuck at the core's own
-  // hardcoded default. The code-to-language mapping isn't in this codebase
-  // itself, but it is in MAME's vsmile.cpp driver (src/mame/vtech/vsmile.cpp,
-  // INPUT_PORTS_START(vsmile)/(vsmilem)'s "REGION" port) - switch_menu.cpp's
-  // RegionLabel() carries that table over verbatim for the Library & Storage
-  // Region row's display, separately for the standard V.Smile vs. V.Smile
-  // Motion systems (they differ) - see switch/README.md for the full table
-  // and how it was found.
+  // hardcoded default. switch_menu.cpp's RegionLabel() names each code, and
+  // those names depend on which BIOS is loaded (the Motion BIOS uses
+  // different codes, and two standard-BIOS codes swap meaning between v1.02
+  // and v1.03) - see switch_bios.h and switch/README.md.
   int region = 0xF;  // matches VSmile's own hardcoded default - US English
+  // The other two console jumpers/straps veesem exposes (-pal/-ntsc,
+  // -novtech). pal_timing: 312-line 50 Hz video instead of 262-line 60 Hz -
+  // the core has always supported it (VSmile::Reset(pal)), and main.cpp
+  // paces 5 emulated frames per 6 display refreshes. vtech_logo: Port C bit
+  // 4; off skips the BIOS intro's VTech logo (vsmile.cpp's GpioIn()).
+  // Both apply at launch, like region.
+  bool pal_timing = false;
+  bool vtech_logo = true;
 
   // Controller - see GameAction above. action_binding[i] is a button name
   // ("A","B","X","Y","L","R","ZL","ZR","StickL","StickR","Plus","Minus") or
@@ -105,6 +124,28 @@ struct SwitchSettings {
   // L2/R2 equivalents (ZL/ZR) are digital, not analog pulls.
   std::string action_binding[kGameActionCount];
   float trigger_threshold = 0.5f;
+
+  // Player 2's own bindings for the 8 V.Smile buttons, indexed like
+  // action_binding's first 8 entries. Defaults to the same layout player 1
+  // starts with.
+  std::string p2_binding[kVsmileButtonCount];
+
+  // What is plugged into V.Smile controller port 1: "joystick" (the Switch
+  // pad as a V.Smile joystick), "keyboard" (a USB keyboard as the Smart
+  // Keyboard - see switch_input_poll_keyboard()) or "motion" (the pad as a
+  // V.Smile Motion controller, tilt from its accelerometer - see
+  // switch_input_poll_motion()) or "mat" (the pad as the Jammin' Gym Class
+  // dance mat - VSmileJoy::QueueMatUpdates() has the button mapping).
+  // keyboard_language is the
+  // Smart Keyboard's handshake language: us|uk|fr|de|es. Every Smart
+  // Keyboard cart tested (US/FR/DE/ES) switches its whole typing layout to
+  // match it, so it's shown as "Keyboard Layout" and is best set to match
+  // the USB keyboard's own layout.
+  std::string controller_type = "joystick";
+  // Player 2's port: "joystick", "motion" (a second Motion controller) or
+  // "mat" (a second dance mat, for Gym Class's two-player mode).
+  std::string p2_controller_type = "joystick";
+  std::string keyboard_language = "us";
 };
 
 extern SwitchSettings g_settings;
@@ -132,6 +173,10 @@ long long switch_settings_last_played(const std::string& full_path);
 int switch_settings_last_slot(const std::string& rom_path);
 void switch_settings_set_last_slot(const std::string& rom_path, int slot);
 
+// The Smart Keyboard handshake byte for keyboard_language (0x40 US, 0x41 UK,
+// 0x42 French, 0x43 Spanish, 0x44 German).
+uint8_t switch_settings_keyboard_language_code();
+
 // Controller / GameAction support.
 const char* switch_settings_action_label(GameAction action);  // e.g. "Enter / OK"
 
@@ -141,6 +186,11 @@ const char* switch_settings_action_label(GameAction action);  // e.g. "Enter / O
 // currently holds it, and replaces action's own previous binding. Saves
 // immediately. button_name = "" unbinds action with no other side effect.
 void switch_settings_bind(GameAction action, const std::string& button_name);
+
+// Same as switch_settings_bind() but for player 2's p2_binding table, which
+// only covers the 8 V.Smile buttons - `action` must be one of Enter..Green.
+// 1:1 is enforced within player 2's own table only.
+void switch_settings_bind_p2(GameAction action, const std::string& button_name);
 
 // A single HidNpadButton_ bit for a binding's stored name (0 if "" or
 // unrecognized), and the reverse lookup (used by the Controller screen's

@@ -10,6 +10,7 @@
 // pull-callback here - vsync from eglSwapBuffers paces the loop directly,
 // same as Yokoi's.
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +28,7 @@
 #include "vsmile.h"
 
 #include "audio/switch_audio.h"
+#include "core/switch_bios.h"
 #include "core/switch_frameskip.h"
 #include "core/switch_menu.h"
 #include "core/switch_present.h"
@@ -184,6 +186,22 @@ std::string NvramFilePath(const std::string& rom_path) {
   return "sdmc:/switch/dsmile/nvram/" + base + ".nvram";
 }
 
+// The console's OFF state for a cart, kept between sessions: a full core
+// state captured once the game has put the console into standby (after
+// OFF and its goodbye). Real hardware keeps RAM powered in standby, which is
+// how a game "remembers your place" (Smart Keyboard manual); loading this at
+// the next launch and pressing ON is the same as never having taken the
+// cartridge out. Consumed on load, like the RAM it stands for: quitting
+// without turning the console off (L+R+Plus, HOME) boots cold next time.
+std::string StandbyFilePath(const std::string& rom_path) {
+  std::string base = rom_path;
+  const size_t slash = base.find_last_of('/');
+  if (slash != std::string::npos) base = base.substr(slash + 1);
+  const size_t dot = base.find_last_of('.');
+  if (dot != std::string::npos) base = base.substr(0, dot);
+  return "sdmc:/switch/dsmile/standby/" + base + ".dss";
+}
+
 bool HasZipExtension(const std::string& path) {
   if (path.size() < 4) return false;
   std::string ext = path.substr(path.size() - 4);
@@ -199,6 +217,151 @@ bool HasZipExtension(const std::string& path) {
 // sitting compressed on disk). Optional BIOS from switch_menu_bios_path()
 // is applied if present - not required (see README.md's BIOS note), just
 // improves compatibility on a few titles.
+bool KeyboardSelected() { return g_settings.controller_type == "keyboard"; }
+bool MotionSelected() { return g_settings.controller_type == "motion"; }
+bool P2MotionSelected() { return g_settings.p2_controller_type == "motion"; }
+bool MatSelected() { return g_settings.controller_type == "mat"; }
+bool P2MatSelected() { return g_settings.p2_controller_type == "mat"; }
+
+// Whether the loaded BIOS is a V.Smile Motion one - set by LoadGame().
+bool s_motion_bios = false;
+// The console type ApplyPortDevices() last applied (-1: none yet, so the
+// next call applies it - reset per launch).
+int s_applied_motion_console = -1;
+
+// Port 1 is the Switch pad as a joystick, a USB keyboard as the Smart
+// Keyboard, or the pad as a Motion controller or dance mat; port 2 (the
+// second pad) is a joystick, Motion controller or mat. Cheap no-op when unchanged,
+// so it's also called every frame to pick up a change made from the pause
+// menu (the core re-plugs the port). Motion carts only offer motion
+// controls on a Motion console, so a Motion controller implies one (as does
+// a Motion BIOS, matching the real hardware).
+void ApplyPortDevices(dsmile::VSmile& vs) {
+  vs.SetPort1Device(KeyboardSelected() ? dsmile::PortDevice::SmartKeyboard
+                    : MotionSelected() ? dsmile::PortDevice::Motion
+                    : MatSelected()    ? dsmile::PortDevice::Mat
+                                       : dsmile::PortDevice::Joystick,
+                    switch_settings_keyboard_language_code());
+  vs.SetPort2Device(P2MotionSelected() ? dsmile::PortDevice::Motion
+                    : P2MatSelected()  ? dsmile::PortDevice::Mat
+                                       : dsmile::PortDevice::Joystick);
+  // The console type only follows the settings when they change (or at
+  // launch): a loaded save state brings the board it was saved on, and
+  // switching it under a running game makes the game restart.
+  const int motion_console = (s_motion_bios || MotionSelected() || P2MotionSelected()) ? 1 : 0;
+  if (motion_console != s_applied_motion_console) {
+    vs.SetMotionConsole(motion_console != 0);
+    s_applied_motion_console = motion_console;
+  }
+}
+
+// Whether the running console uses PAL video timing (set at launch from
+// g_settings.pal_timing). PAL is 50 frames a second on a 60 Hz display:
+// each display refresh adds 5 to s_pal_credit and each shown emulated frame
+// costs 6; a refresh with no credit shows the previous frame again, giving 5
+// emulated frames per 6 refreshes. Frames frame skip doesn't render don't
+// wait for vsync, so they aren't charged.
+bool s_pal = false;
+int s_pal_credit = 0;
+
+// Controller LEDs overlay (Settings > Graphics > Controller LEDs): the four
+// colour-button lights the console sets with its 6x commands (bit 0 green,
+// 1 blue, 2 yellow, 3 red - veesem's order), drawn red/yellow/blue/green
+// like the pad, dim when off. One row per connected port, bottom left.
+void DrawLeds(uint8_t leds1, uint8_t leds2, bool p2) {
+  static const float kColour[4][3] = {{0.95f, 0.2f, 0.2f}, {1.0f, 0.85f, 0.1f},
+                                      {0.25f, 0.45f, 1.0f}, {0.2f, 0.85f, 0.3f}};
+  static const int kBit[4] = {3, 2, 1, 0};  // red, yellow, blue, green
+  constexpr float kSize = 22.0f, kGap = 8.0f, kMargin = 20.0f;
+  glViewport(0, 0, kViewportW, kViewportH);  // the game pass may leave a smaller one
+  switch_ui_begin_frame(kViewportW, kViewportH);
+  const int rows = p2 ? 2 : 1;
+  for (int row = 0; row < rows; row++) {
+    const uint8_t leds = row == 0 ? leds1 : leds2;
+    const float y = kViewportH - kMargin - kSize - (rows - 1 - row) * (kSize + kGap);
+    for (int i = 0; i < 4; i++) {
+      const float x = kMargin + i * (kSize + kGap);
+      const float k = ((leds >> kBit[i]) & 1) ? 1.0f : 0.3f;
+      switch_ui_draw_rect(x - 2, y - 2, kSize + 4, kSize + 4, 0.0f, 0.0f, 0.0f, 0.6f);
+      switch_ui_draw_rect(x, y, kSize, kSize, kColour[i][0] * k, kColour[i][1] * k, kColour[i][2] * k, 1.0f);
+    }
+  }
+  glDisable(GL_BLEND);  // switch_ui_begin_frame() turns it on; the game pass expects it off
+}
+
+// Shown over the black screen while the console is off (standby) and the
+// player turned it off themselves, so it doesn't look like a hang.
+void DrawStandbyHint(bool on_bound) {
+  glViewport(0, 0, kViewportW, kViewportH);
+  switch_ui_begin_frame(kViewportW, kViewportH);
+  const std::string line1 = "The V.Smile is off";
+  const std::string line2 = on_bound ? "Press ON to turn it on" : "Press Enter to turn it on";
+  constexpr float kBig = 34.0f, kSmall = 24.0f;
+  switch_ui_draw_text((kViewportW - switch_ui_text_width(line1, kBig)) / 2, kViewportH / 2 - 44, kBig,
+                      0.85f, 0.85f, 0.85f, 1.0f, line1);
+  switch_ui_draw_text((kViewportW - switch_ui_text_width(line2, kSmall)) / 2, kViewportH / 2 + 8, kSmall,
+                      0.6f, 0.6f, 0.6f, 1.0f, line2);
+  glDisable(GL_BLEND);
+}
+
+// Frames left to hold the console's ON, OFF and RESTART buttons after a
+// "BIOS test screen" launch (Library & Storage). The BIOS checks all three
+// (active low) in its first ticks; once they're released it stays on the
+// "Main Unit Test Program" screen (findings.md §8).
+int s_console_hold_frames = 0;
+
+// Scripted presses of the console's ON / OFF buttons, in frames left: ON
+// after resuming a saved standby, OFF when the pause menu's Quit turns the
+// console off. s_powering_off: Quit is waiting (up to kPowerOffTimeout
+// frames) for the game to finish its goodbye and enter standby.
+int s_press_on = 0, s_press_off = 0;
+bool s_powering_off = false;
+int s_power_off_frames = 0;
+constexpr int kPowerPressFrames = 10;
+constexpr int kPowerOffTimeout = 600;  // 10 s
+// Set by LoadBiosOnly(): no cartridge, so no standby to keep.
+bool s_bios_only = false;
+
+// Reads a BIOS dump, fixing a known byte-swapped one (the core reads
+// little-endian words, so a swapped file won't boot). Sets s_motion_bios.
+bool ReadBios(const std::string& path, std::vector<uint8_t>& bios) {
+  s_motion_bios = false;
+  if (path.empty() || !LoadFile(path.c_str(), bios)) return false;
+  const BiosInfo info = switch_bios_identify_crc(switch_bios_crc32(bios.data(), bios.size()));
+  switch_bios_fix_byte_order(bios, info);
+  s_motion_bios = info.family == BiosFamily::Motion;
+  return true;
+}
+
+// Boots the BIOS with no cartridge inserted, as on a real console: with the
+// slot empty the BIOS answers at every bank (MAME's vsmile banked_map), so
+// it's loaded as a 4x-mirrored "cart" as well as the sysrom. It then shows
+// its insert-a-cartridge screen, or its test screen with `test_screen`.
+std::unique_ptr<dsmile::VSmile> LoadBiosOnly(const std::string& bios_path, bool test_screen) {
+  std::vector<uint8_t> bios;
+  if (!ReadBios(bios_path, bios) || bios.size() < 2) return nullptr;
+  constexpr size_t kBankBytes = 0x200000;  // 1M words
+  std::vector<uint8_t> mirrored(kBankBytes * 4, 0);
+  for (size_t bank = 0; bank < 4; bank++) {
+    std::copy_n(bios.begin(), std::min(bios.size(), kBankBytes), mirrored.begin() + bank * kBankBytes);
+  }
+  auto vs = std::make_unique<dsmile::VSmile>();
+  if (!vs->LoadCart(mirrored.data(), mirrored.size())) return nullptr;
+  vs->LoadSysrom(bios.data(), bios.size());
+  vs->SetVtechLogo(g_settings.vtech_logo);  // Settings > Library & Storage > VTech Logo
+  vs->SetAccurate(g_settings.accurate_renderer);
+  vs->SetRegion(g_settings.region);
+  s_applied_motion_console = -1;  // a fresh console: apply the settings' type
+  ApplyPortDevices(*vs);
+  s_pal = g_settings.pal_timing;  // Settings > Library & Storage > Video Timing
+  switch_frameskip_set_pal(s_pal);
+  vs->Reset(s_pal);
+  s_console_hold_frames = test_screen ? 60 : 0;
+  s_bios_only = true;
+  s_press_on = s_press_off = 0;
+  return vs;
+}
+
 std::unique_ptr<dsmile::VSmile> LoadGame(const std::string& rom_path) {
   std::vector<uint8_t> rom;
   const bool ok = HasZipExtension(rom_path) ? switch_zip_extract_bin(rom_path, rom)
@@ -208,18 +371,18 @@ std::unique_ptr<dsmile::VSmile> LoadGame(const std::string& rom_path) {
   auto vs = std::make_unique<dsmile::VSmile>();
   if (!vs->LoadCart(rom.data(), rom.size())) return nullptr;
 
-  const std::string bios_path = switch_menu_bios_path();
-  if (!bios_path.empty()) {
-    std::vector<uint8_t> bios;
-    if (LoadFile(bios_path.c_str(), bios)) {
-      vs->LoadSysrom(bios.data(), bios.size());
-    }
-  }
+  std::vector<uint8_t> bios;
+  if (ReadBios(switch_menu_bios_path(), bios)) vs->LoadSysrom(bios.data(), bios.size());
+  s_console_hold_frames = 0;
 
-  vs->SetVtechLogo(true);
+  vs->SetVtechLogo(g_settings.vtech_logo);  // Settings > Library & Storage > VTech Logo
   vs->SetAccurate(g_settings.accurate_renderer);  // Settings > Graphics > Renderer
   vs->SetRegion(g_settings.region);  // Settings > Library & Storage > Region - see its own comment
-  vs->Reset(/*pal=*/false);
+  s_applied_motion_console = -1;  // a fresh console: apply the settings' type
+  ApplyPortDevices(*vs);  // Settings > Controller > Controller Type
+  s_pal = g_settings.pal_timing;  // Settings > Library & Storage > Video Timing
+  switch_frameskip_set_pal(s_pal);
+  vs->Reset(s_pal);
 
   // Cart-side NVRAM (see vsmile.h's HasNvram()/GetNvram()) - only ever
   // non-empty for the handful of carts LoadCart() itself recognizes as
@@ -233,7 +396,36 @@ std::unique_ptr<dsmile::VSmile> LoadGame(const std::string& rom_path) {
       vs->SetNvram(nvram.data(), nvram.size());
     }  // else: no save yet, or first time this cart's been seen - stays zeroed
   }
+
+  s_bios_only = false;
+  s_press_on = s_press_off = 0;
+  const std::string standby = StandbyFilePath(rom_path);
+  std::vector<uint8_t> state;
+  if (LoadFile(standby.c_str(), state)) {
+    // Resume the console as it was left: asleep, RAM intact. Then press ON,
+    // as a player would. A state from another version (or a different cart
+    // with the same name) fails LoadState's guards and we boot cold.
+    if (vs->LoadState(state.data(), state.size())) {
+      s_press_on = kPowerPressFrames;
+      s_pal = vs->Soc().IsPal();  // the saved console's video standard wins
+      switch_frameskip_set_pal(s_pal);
+    } else {
+      vs->Reset(s_pal);
+    }
+    remove(standby.c_str());
+  }
   return vs;
+}
+
+// Writes the console's standby state for `rom_path` (see StandbyFilePath()).
+void SaveStandby(dsmile::VSmile& vs, const std::string& rom_path) {
+  mkdir("sdmc:/switch/dsmile/standby", 0777);  // EEXIST is fine
+  std::vector<uint8_t> data;
+  vs.SaveState(data);
+  FILE* f = fopen(StandbyFilePath(rom_path).c_str(), "wb");
+  if (!f) return;
+  fwrite(data.data(), 1, data.size(), f);
+  fclose(f);
 }
 
 // Writes the cart's current NVRAM content back to its dedicated save file -
@@ -282,7 +474,11 @@ bool LoadStateFromSlot(dsmile::VSmile& vs, const std::string& rom_path, int slot
   std::vector<uint8_t> data;
   if (!LoadFile(switch_settings_state_file_path(rom_path, slot).c_str(), data)) return false;
   const bool ok = vs.LoadState(data.data(), data.size());
-  if (ok) switch_settings_set_last_slot(rom_path, slot);
+  if (ok) {
+    switch_settings_set_last_slot(rom_path, slot);
+    s_pal = vs.Soc().IsPal();  // the state's video standard, like its console type
+    switch_frameskip_set_pal(s_pal);
+  }
   return ok;
 }
 
@@ -328,6 +524,17 @@ int main(int, char**) {
       int slot = 0;
       const MenuAction action = switch_menu_update(in.down, in.held, rom_path, slot);
       if (action == MenuAction::Quit) break;  // + at the game list: quit to hbmenu
+      if (action == MenuAction::LaunchBios) {
+        auto loaded = LoadBiosOnly(rom_path, slot == 1);
+        if (loaded) {
+          vs = std::move(loaded);
+          current_rom_path = rom_path;  // save states go under the BIOS file's name
+          state = AppState::Playing;
+          rewind_buffer.clear();
+          switch_frameskip_reset();
+          switch_menu_set_current_game(rom_path);
+        }
+      }
       if (action == MenuAction::LaunchGame) {
         auto loaded = LoadGame(rom_path);
         if (loaded) {
@@ -356,14 +563,35 @@ int main(int, char**) {
       switch (switch_menu_update(in.down, in.held, unused, slot)) {
         case MenuAction::ResumeGame: state = AppState::Playing; break;
         case MenuAction::ResetGame:
-          vs->Reset(/*pal=*/false);
+          // The console's RESTART button: a hardware reset that keeps RAM
+          // (VSmile::Restart()), as the manuals describe it - "start the
+          // game over from the beginning".
+          vs->Restart();
           state = AppState::Playing;
           break;
         case MenuAction::QuitToGrid:
-          FlushNvram(*vs, current_rom_path);
-          vs.reset();
-          rewind_buffer.clear();
-          state = AppState::RomList;
+          if (s_bios_only) {
+            vs.reset();
+            rewind_buffer.clear();
+            state = AppState::RomList;
+            break;
+          }
+          // Already off (the OFF binding): keep that standby and leave now.
+          if (vs->Sleeping()) {
+            SaveStandby(*vs, current_rom_path);
+            FlushNvram(*vs, current_rom_path);
+            vs.reset();
+            rewind_buffer.clear();
+            state = AppState::RomList;
+            break;
+          }
+          // Turn the console off first: press OFF and keep running so the
+          // game can play its goodbye and enter standby, which is then kept
+          // for the next launch (see the power-off check after RunFrame()).
+          s_powering_off = true;
+          s_power_off_frames = 0;
+          s_press_off = kPowerPressFrames;
+          state = AppState::Playing;
           break;
         case MenuAction::SaveState:
           SaveStateToSlot(*vs, current_rom_path, slot);
@@ -397,6 +625,7 @@ int main(int, char**) {
       FlushNvram(*vs, current_rom_path);
       vs.reset();
       rewind_buffer.clear();
+      s_powering_off = false;
       // No automatic rescan here anymore - it decodes every cover PNG
       // again, which isn't free now that the grid has cover art. Library &
       // Storage > Rescan library covers the "SD card changed" case instead.
@@ -409,7 +638,7 @@ int main(int, char**) {
     // handles the pause/resume transition itself; switch_menu owns
     // everything about what's actually in that screen.
     const uint64_t menu_bit = switch_settings_button_bit(g_settings.action_binding[(int)GameAction::Menu]);
-    if (menu_bit != 0 && (in.down & menu_bit)) {
+    if (menu_bit != 0 && (in.down & menu_bit) && !s_powering_off) {
       switch_menu_enter_pause();
       state = AppState::Paused;
       continue;
@@ -421,11 +650,11 @@ int main(int, char**) {
     // calling saveState(lastSlot())/loadState(lastSlot()) directly. Doesn't
     // pause or skip this frame's gameplay, just fires alongside it.
     const uint64_t save_bit = switch_settings_button_bit(g_settings.action_binding[(int)GameAction::SaveState]);
-    if (save_bit != 0 && (in.down & save_bit)) {
+    if (save_bit != 0 && (in.down & save_bit) && !s_powering_off) {
       SaveStateToSlot(*vs, current_rom_path, switch_settings_last_slot(current_rom_path));
     }
     const uint64_t load_bit = switch_settings_button_bit(g_settings.action_binding[(int)GameAction::LoadState]);
-    if (load_bit != 0 && (in.down & load_bit)) {
+    if (load_bit != 0 && (in.down & load_bit) && !s_powering_off) {
       LoadStateFromSlot(*vs, current_rom_path, switch_settings_last_slot(current_rom_path));
     }
 
@@ -442,10 +671,20 @@ int main(int, char**) {
     const bool p2_connected = switch_input_player2_ready();
     vs->SetPlayer2Connected(p2_connected);
 
+    // PAL: no credit for an emulated frame this refresh - show the last one
+    // again (see s_pal_credit).
+    if (s_pal && s_pal_credit < 0) {
+      s_pal_credit += 5;
+      switch_render_frame(vs->Framebuffer());
+      if (g_settings.show_leds) DrawLeds(vs->Leds(), vs->Leds2(), p2_connected);
+      eglSwapBuffers(s_display, s_surface);
+      continue;
+    }
+
     // Rewind: held-based, no menu toggle (Android doesn't have one for this
     // either).
     const uint64_t rewind_bit = switch_settings_button_bit(g_settings.action_binding[(int)GameAction::Rewind]);
-    const bool rewinding = rewind_bit != 0 && (in.held & rewind_bit);
+    const bool rewinding = rewind_bit != 0 && (in.held & rewind_bit) && !s_powering_off;
 
     if (rewinding) {
       // Pop and load the most recently recorded snapshot, then simulate one
@@ -465,14 +704,80 @@ int main(int, char**) {
 
       if (switch_frameskip_should_render()) {
         switch_render_frame(vs->Framebuffer());
+        if (g_settings.show_leds) DrawLeds(vs->Leds(), vs->Leds2(), p2_connected);
         eglSwapBuffers(s_display, s_surface);
+        if (s_pal) s_pal_credit -= 1;  // this frame (-6) plus this refresh (+5)
       }
     } else {
-      vs->SetInput(in.joy_x, in.joy_y, in.buttons);
-      if (p2_connected) vs->SetInput2(in2.joy_x, in2.joy_y, in2.buttons);
+      ApplyPortDevices(*vs);
+      uint32_t p1_buttons = in.buttons;
+      if (KeyboardSelected()) {
+        // The pad stays usable as the keyboard's own joystick and
+        // OK/Quit/Help keys; the USB keyboard adds typing on top.
+        const SwitchKeyboardInput kb = switch_input_poll_keyboard();
+        for (const auto& ev : kb.events) vs->KeyboardKey(ev.first, ev.second);
+        p1_buttons |= kb.buttons;
+      } else if (MotionSelected()) {
+        const SwitchMotionInput m = switch_input_poll_motion();
+        vs->SetMotion(m.x, m.y, m.z);
+      }
+      // While Quit is turning the console off, the pads let go.
+      if (s_powering_off) vs->SetInput(0, 0, 0);
+      else vs->SetInput(in.joy_x, in.joy_y, p1_buttons);
+
+      // Console buttons: the bindings (Settings > Controller, unbound by
+      // default), plus scripted presses. RESTART is the hardware reset
+      // line, so it fires once per press rather than being held.
+      const auto action_bit = [](GameAction a) {
+        return switch_settings_button_bit(g_settings.action_binding[(int)a]);
+      };
+      const uint64_t on_bit = action_bit(GameAction::PowerOn), off_bit = action_bit(GameAction::PowerOff);
+      const uint64_t restart_bit = action_bit(GameAction::Restart);
+      if (!s_powering_off && restart_bit != 0 && (in.down & restart_bit)) vs->Restart();
+      // Asleep with ON unbound, Enter turns the console back on (there'd be
+      // no other way short of Reset Game).
+      const uint64_t enter_bit = action_bit(GameAction::Enter);
+      if (!s_powering_off && on_bit == 0 && vs->Sleeping() && enter_bit != 0 && (in.down & enter_bit)) {
+        s_press_on = kPowerPressFrames;
+      }
+      bool on = s_press_on > 0, off = s_press_off > 0;
+      if (!s_powering_off) {
+        on = on || (on_bit != 0 && (in.held & on_bit));
+        off = off || (off_bit != 0 && (in.held & off_bit));
+      }
+      if (s_press_on > 0) s_press_on--;
+      if (s_press_off > 0) s_press_off--;
+      if (s_console_hold_frames > 0) {
+        const bool hold = --s_console_hold_frames > 0;
+        vs->SetConsoleButtons(hold, hold, hold);
+      } else {
+        vs->SetConsoleButtons(on, off, false);
+      }
+      if (p2_connected) {
+        vs->SetInput2(in2.joy_x, in2.joy_y, in2.buttons);
+        if (P2MotionSelected()) {
+          const SwitchMotionInput m2 = switch_input_poll_motion_p2();
+          vs->SetMotion2(m2.x, m2.y, m2.z);
+        }
+      }
       const double run_frame_start_ms = NowMs();
       vs->RunFrame();
       switch_frameskip_record_frame_time(NowMs() - run_frame_start_ms);
+
+      // Quit's power-off: once the game has put the console into standby,
+      // keep that state for the next launch and leave. If it never does
+      // (a game that ignores OFF on this screen), give up after the
+      // timeout and quit without one.
+      if (s_powering_off && (vs->Sleeping() || ++s_power_off_frames > kPowerOffTimeout)) {
+        if (vs->Sleeping()) SaveStandby(*vs, current_rom_path);
+        else remove(StandbyFilePath(current_rom_path).c_str());
+        s_powering_off = false;
+        FlushNvram(*vs, current_rom_path);
+        vs.reset();
+        rewind_buffer.clear();
+        state = AppState::RomList;
+        continue;
+      }
 
       // Push this frame's snapshot *after* it ran (matches jni_bridge.cpp's
       // Loop() exactly - see kRewindMax's comment above).
@@ -487,7 +792,10 @@ int main(int, char**) {
 
       if (switch_frameskip_should_render()) {
         switch_render_frame(vs->Framebuffer());
+        if (g_settings.show_leds) DrawLeds(vs->Leds(), vs->Leds2(), p2_connected);
+        if (vs->Sleeping() && !s_powering_off) DrawStandbyHint(on_bit != 0);
         eglSwapBuffers(s_display, s_surface);
+        if (s_pal) s_pal_credit -= 1;  // this frame (-6) plus this refresh (+5)
       }
     }
   }

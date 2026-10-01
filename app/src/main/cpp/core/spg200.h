@@ -6,6 +6,11 @@
 
 namespace dsmile {
 
+#ifdef DSMILE_TEST_HOOKS
+extern int g_test_rwatch_lo, g_test_rwatch_hi;
+extern int g_test_wwatch_lo, g_test_wwatch_hi;
+#endif
+
 // Machine-side hooks (implemented by VSmile).
 struct MachineIo {
   virtual u16 GpioIn(int port) = 0;                       // external pin state
@@ -27,7 +32,9 @@ class Spg200 {
   void SetSysrom(const u16* sysrom) { sysrom_ = sysrom; }
   void SetCs2(bool active) { cs2_offset_ = active ? 0x400000u : 0u; }
 
-  void Reset(bool pal);
+  // keep_ram: a /RST pulse (the RESTART / ON-RESTART button) resets the
+  // chip but leaves the SRAM contents alone, unlike a power-on.
+  void Reset(bool pal, bool keep_ram = false);
   void RunFrame();
 
   u16 Read(u32 addr);
@@ -45,7 +52,12 @@ class Spg200 {
   Ppu& GetPpu() { return ppu_; }
   Spu& GetSpu() { return spu_; }
   UnSP& GetCpu() { return cpu_; }
+  // Work RAM (0x2800 words), read-only, for desktop debugging tools.
+  const u16* DebugRam() const { return ram_.data(); }
   bool IsPal() const { return pal_; }
+  // Standby (see RunFrame()): the CPU is halted by a 0xAA55 write to 3D28
+  // and waits for a wakeup source (3D29) - the console's OFF state.
+  bool Sleeping() const { return sleeping_; }
 
   void SaveState(struct StateWriter& w) const;
   void LoadState(struct StateReader& r);
@@ -108,6 +120,11 @@ class Spg200 {
   u32 adc_div_ = 0;
   u16 prng_[2] = {0x1418, 0x1658};
   s32 watchdog_counter_ = 20250000;
+  bool sleeping_ = false;
+  u16 wakeup_src_ = 0;      // 3D29: bits as the low half of IO_IRQ_STATUS (0x80 key change), bit2 2 Hz
+  u16 wakeup_time_ = 0;     // 3D2A (stored; games write 0xC8)
+  u16 sleep_keys_ = 0;      // console-button pins last seen asleep: ON wakes on its press edge
+  s32 sleep_2hz_ = 0;       // cycles to the next 2 Hz wakeup tick
 
   // UART
   u16 uart_ctrl_ = 0, uart_status_ = 0x0022;

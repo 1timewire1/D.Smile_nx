@@ -36,6 +36,12 @@ menu chrome built for a gamepad and a TV instead of a touchscreen.
   the Android app, BIOS optional.
 - Save states (3 slots per game) and Rewind.
 - Cart-side NVRAM saves for the titles that use onboard save memory.
+- Real power-off: Quit turns the console off the way the OFF button does
+  (the game's goodbye plays), and its standby is kept, so the next launch
+  picks up where the game left off - "Continue Game" and all. Console
+  ON / OFF / RESTART can be bound to buttons too.
+- Console options: PAL or NTSC video, the VTech-logo jumper, and booting the
+  BIOS on its own, including its hidden "Main Unit Test Program" screen.
 
 **Look**
 - Pixel, sharp, and CRT display modes (curvature, glow, scanlines, mask,
@@ -49,8 +55,20 @@ menu chrome built for a gamepad and a TV instead of a touchscreen.
 **Control**
 - Full gamepad remapping and hotkeys (save/load state, rewind, menu) via
   Settings > Controller.
-- Two-player support - see [switch/README.md](switch/README.md) for the
-  current status and a known limitation around controller crosstalk.
+- Two-player support: connect a second controller and it's automatically
+  player 2, with its own remappable buttons. Games with simultaneous
+  two-player modes need both connected; turn-taking games may accept input
+  from either controller, which is how those games are designed.
+- V.Smile Smart Keyboard: plug a USB keyboard into the Switch and set
+  Settings > Controller > Controller Type to Smart Keyboard (USB).
+- V.Smile Motion: tilt, swing and shake the Switch controller (its
+  gyro/accelerometer) - one or two players.
+- Jammin' Gym Class dance mat, mapped onto the pad.
+- The analog stick reports the V.Smile joystick's five tilt levels, and an
+  optional overlay shows the controller's colour-button lights.
+- The BIOS picker recognizes each known BIOS version (and fixes
+  byte-swapped dumps automatically), and the Region setting's labels match
+  the version in use.
 
 ### Getting started (Switch)
 
@@ -115,6 +133,16 @@ This project wouldn't exist without the V.Smile reverse engineering work that ca
   accurate-render fade/saturation formulas follow MAME's implementation.
 - **[V.Frown](https://github.com/Schnert0/VFrown)** by Schnert0 — a further
   reference for controller timing and hardware behavior.
+- **The V.Smile research community** — the
+  [V.Smile development wiki](https://vtech.pulkomandy.tk/) (PulkoMandy and
+  contributors: I/O pins, console-type straps, controller protocol), the
+  VSmileDev and LFHacks Discord servers (V.simer, KanedaFr, V.iscoStarsmile,
+  bmx, toadster172 and others: the Smart Keyboard handshake, the BIOS test
+  screen, standby and the power buttons), KanedaFr's annotated
+  [v1.03 BIOS disassembly](https://bitbucket.org/SpritesMind/vsmile_disassembly),
+  and The Cutting Room Floor's V.Smile pages. The Smart Keyboard, Motion,
+  dance mat, standby and test-screen support in this fork were built from
+  their findings.
 - **[Oboe](https://github.com/google/oboe)** by Google (Apache-2.0) — the
   low-latency Android audio library D.Smile ships with.
 - **[NaGaa95](https://github.com/NaGaa95)**, author of

@@ -7,12 +7,12 @@
 
 namespace {
 
-// Switch's display (handheld or docked) is 60Hz, and this project always
-// runs V.Smile carts as NTSC (see main.cpp's Reset(/*pal=*/false)), so a
-// single fixed target is close enough - a few hundredths of a percent off
-// doesn't matter for a heuristic that's already re-averaging over dozens of
-// frames and stepping gradually.
-constexpr double kTargetFrameMs = 1000.0 / 60.0;
+// Switch's display (handheld or docked) is 60Hz. NTSC runs one emulated
+// frame per refresh; PAL (Library & Storage > Video Timing) runs 5 per 6, so
+// each emulated frame gets 20 ms (switch_frameskip_set_pal()). A few
+// hundredths of a percent off doesn't matter for a heuristic that's already
+// re-averaging over dozens of frames and stepping gradually.
+double kTargetFrameMs = 1000.0 / 60.0;
 
 // How much a single frame's RunFrame() time influences the rolling
 // average (exponential moving average) - low weight so one slow frame
@@ -53,6 +53,8 @@ void switch_frameskip_reset() {
   g_auto_level = 0;
   g_present_counter = 0;
 }
+
+void switch_frameskip_set_pal(bool pal) { kTargetFrameMs = pal ? 1000.0 / 50.0 : 1000.0 / 60.0; }
 
 void switch_frameskip_record_frame_time(double run_frame_ms) {
   if (g_settings.frame_skip_mode != "auto") return;  // no cost tracking a fixed/off level can't use

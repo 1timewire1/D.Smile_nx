@@ -29,6 +29,9 @@
 // suddenly running slow.
 void switch_frameskip_reset();
 
+// The per-emulated-frame time budget: 1/60 s, or 1/50 s under PAL timing.
+void switch_frameskip_set_pal(bool pal);
+
 // Call once per frame with how long VSmile::RunFrame() actually took (just
 // that call - not audio/render/present), in milliseconds. Feeds the
 // rolling average auto mode reevaluates against periodically.

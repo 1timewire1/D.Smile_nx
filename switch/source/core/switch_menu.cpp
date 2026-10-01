@@ -17,6 +17,7 @@
 #include "render/switch_chrome.h"
 #include "render/switch_header_icon.h"
 #include "render/switch_ui.h"
+#include "switch_bios.h"
 #include "switch_dirbrowse.h"
 #include "switch_frameskip.h"
 #include "switch_library.h"
@@ -216,84 +217,66 @@ std::string ActiveBiosFile(const std::vector<std::string>& files) {
   return files.front();
 }
 
-// Standard zlib/PNG CRC-32 (reflected, poly 0xEDB88320) of a whole file -
-// just enough to tell a handful of specific known BIOS dumps apart by
-// content rather than by filename (which the user can rename). Table is
-// built once and kept for the process lifetime; 2MB is a few ms at most,
-// and this only ever runs from a settings screen, never gameplay.
-uint32_t Crc32File(const std::string& path) {
-  static uint32_t table[256];
-  static bool table_ready = false;
-  if (!table_ready) {
-    for (uint32_t i = 0; i < 256; i++) {
-      uint32_t c = i;
-      for (int k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-      table[i] = c;
+std::string BiosPath(const std::string& filename) { return std::string(kBiosDir) + "/" + filename; }
+
+// Region/language label for VSmile::SetRegion()'s raw nibble (the Port C
+// jumper the BIOS reads). The standard console's labels come from the
+// community wiki's hardware-tested table (vtech.pulkomandy.tk, page "io",
+// "Configuration" - documented by veesem's author in 2025), which is more
+// detailed than MAME's and shows two codes swapping meaning between BIOS
+// versions: 0x2 is UK English on v1.02 but Italian on v1.03, and 0xA the
+// reverse. On v1.00 every code below 7 behaves as US English. The Motion
+// labels are still MAME's (src/mame/vtech/vsmile.cpp, vsmilem's REGION
+// port) - the wiki doesn't cover the Motion BIOS.
+std::string RegionLabel(int code, const BiosInfo& bios) {
+  if (bios.family == BiosFamily::Motion && bios.version == 0) {  // the Spanish dump's own code
+    static const std::pair<int, const char*> kMotion[] = {
+        {0x02, "Italian"},    {0x05, "English (1)"},     {0x06, "English (2)"},
+        {0x07, "Chinese"},    {0x08, "Mexican Spanish"}, {0x09, "Dutch (?)"},
+        {0x0b, "German"},     {0x0c, "Spanish"},         {0x0d, "French"},
+        {0x0f, "English (3)"},
+    };
+    for (const auto& e : kMotion) {
+      if (e.first == code) return e.second;
     }
-    table_ready = true;
+    return "(undocumented)";
   }
-  FILE* f = fopen(path.c_str(), "rb");
-  if (!f) return 0;
-  uint32_t crc = 0xFFFFFFFFu;
-  uint8_t buf[4096];
-  size_t n;
-  while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-    for (size_t i = 0; i < n; i++) crc = table[(crc ^ buf[i]) & 0xFF] ^ (crc >> 8);
+
+  switch (code) {
+    case 0x7: return "Chinese";
+    case 0x8: return "Portuguese";
+    case 0x9: return "Dutch (?)";
+    case 0xB: return "German";
+    case 0xC: return "Spanish";
+    case 0xD: return "French";
+    case 0xE: return "English (UK)";
+    case 0xF: return "English (US)";
+    default: break;
   }
-  fclose(f);
-  return crc ^ 0xFFFFFFFFu;
+  if (bios.version == 100) return code == 0xA ? "Italian" : "English (US)";
+  switch (code) {
+    case 0x0:
+    case 0x1: return "No boot screen";
+    case 0x3: return "English (US, no subtitle)";
+    case 0x4: return "English (US, alt. subtitle)";
+    case 0x5: return "English (US, no \"V.Smile!\" clip)";
+    case 0x6: return "English (UK, no \"V.Smile!\" clip)";
+    default: break;
+  }
+  // 0x2 / 0xA - the pair that swaps between v1.02 and v1.03.
+  const bool is_italian = (code == 0x2) == (bios.version == 103);
+  if (bios.version == 102 || bios.version == 103) {
+    return is_italian ? "Italian" : "English (UK, no subtitle)";
+  }
+  return "Italian or English (UK)";  // unrecognized BIOS, or none
 }
 
-// CRC-32 of the currently-active BIOS file, cached by filename so it's only
-// actually recomputed when the active BIOS changes, not every frame this
-// screen is open.
-std::string g_bios_crc_cache_file;
-uint32_t g_bios_crc_cache = 0;
-uint32_t ActiveBiosCrc32(const std::string& active_filename) {
-  if (active_filename.empty()) return 0;
-  if (active_filename != g_bios_crc_cache_file) {
-    g_bios_crc_cache_file = active_filename;
-    g_bios_crc_cache = Crc32File(std::string(kBiosDir) + "/" + active_filename);
-  }
-  return g_bios_crc_cache;
-}
-
-// These two CRCs are the V.Smile *Motion* system's known BIOS dumps
-// (MAME's vsmilem CRC(60fa5426)/CRC(427087ea)) - the Motion system's region
-// nibble maps to a different set of languages than the standard V.Smile's
-// (see RegionLabel() below), so which table applies depends on which BIOS
-// is actually loaded, not just on the nibble value itself.
-constexpr uint32_t kMotionBiosCrc[] = {0x60fa5426u, 0x427087eau};
-
-// Region/language label for VSmile::SetRegion()'s raw nibble - sourced
-// verbatim from MAME's src/mame/vtech/vsmile.cpp INPUT_PORTS_START(vsmile)
-// and (vsmilem) PORT_CONFNAME("Language")/PORT_CONFSETTING blocks for the
-// "REGION" port, which is the exact hardware register this core's
-// VSmile::GpioIn() Port C read mirrors (see switch_settings.h's own comment
-// on SwitchSettings::region for how this was discovered). Codes not listed
-// here are genuinely undocumented in MAME's own driver, not an omission on
-// this port's part - shown as "(undocumented)" rather than guessed at.
-std::string RegionLabel(int code, bool is_motion) {
-  static const std::pair<int, const char*> kStandard[] = {
-      {0x02, "Italian"},       {0x07, "Chinese"},        {0x08, "Portuguese"},
-      {0x09, "Dutch"},         {0x0b, "German"},         {0x0c, "Spanish"},
-      {0x0d, "French"},        {0x0e, "English (UK)"},   {0x0f, "English (US)"},
-  };
-  // MAME's own comments note some of these are uncertain/renumbered between
-  // firmware revisions (e.g. Italy was previously 0x0a) - carried over as-is.
-  static const std::pair<int, const char*> kMotion[] = {
-      {0x02, "Italian"},          {0x05, "English (1)"},  {0x06, "English (2)"},
-      {0x07, "Chinese"},          {0x08, "Mexican Spanish"}, {0x09, "Dutch (?)"},
-      {0x0b, "German"},           {0x0c, "Spanish"},       {0x0d, "French"},
-      {0x0f, "English (3)"},
-  };
-  const auto* table = is_motion ? kMotion : kStandard;
-  const int count = is_motion ? (int)(sizeof(kMotion) / sizeof(kMotion[0]))
-                               : (int)(sizeof(kStandard) / sizeof(kStandard[0]));
-  for (int i = 0; i < count; i++) {
-    if (table[i].first == code) return table[i].second;
-  }
-  return "(undocumented)";
+// The BIOS row's value, e.g. "vsmile_v103.bin (v1.03)".
+std::string BiosDescription(const std::string& filename, const BiosInfo& bios) {
+  if (bios.family == BiosFamily::Unknown) return filename + " (unrecognized)";
+  std::string s = filename + " (" + bios.label;
+  if (bios.byteswapped) s += ", byte-swapped";
+  return s + ")";
 }
 
 std::string FreeSpaceText() {
@@ -615,6 +598,7 @@ enum GraphicsRow {
   GX_ASPECT,
   GX_BACKGROUND,
   GX_BEZEL,
+  GX_LEDS,
   GX_CRT_CURVE,
   GX_CRT_GLOW,
   GX_CRT_SCAN,
@@ -634,6 +618,7 @@ std::vector<GraphicsRow> VisibleGraphicsRows() {
   rows.push_back(GX_ASPECT);
   rows.push_back(GX_BACKGROUND);
   rows.push_back(GX_BEZEL);
+  rows.push_back(GX_LEDS);
   if (IsCrtShader()) {
     rows.push_back(GX_CRT_CURVE);
     rows.push_back(GX_CRT_GLOW);
@@ -653,6 +638,7 @@ std::string GraphicsRowLabel(GraphicsRow r) {
     case GX_ASPECT: return "Aspect Ratio";
     case GX_BACKGROUND: return "Background";
     case GX_BEZEL: return "TV Bezel";
+    case GX_LEDS: return "Controller LEDs";
     case GX_CRT_CURVE: return "CRT Curvature";
     case GX_CRT_GLOW: return "CRT Glow";
     case GX_CRT_SCAN: return "CRT Scanlines";
@@ -681,6 +667,7 @@ std::string GraphicsRowValue(GraphicsRow r) {
     case GX_BACKGROUND:
       return kBackgroundNames[OptionIndex(kBackgroundKeys, kOptionCount3, g_settings.background_mode)];
     case GX_BEZEL: return kBezelNames[OptionIndex(kBezelKeys, kOptionCount3, g_settings.bezel_mode)];
+    case GX_LEDS: return g_settings.show_leds ? "Shown" : "Hidden";
     case GX_CRT_CURVE: return Pct(g_settings.crt_curve);
     case GX_CRT_GLOW: return Pct(g_settings.crt_glow);
     case GX_CRT_SCAN: return Pct(g_settings.crt_scan);
@@ -702,22 +689,57 @@ void RenderGraphicsSettings(int viewport_w, int viewport_h) {
   switch_chrome_draw_footer(viewport_w, viewport_h, "A / <-  ->   Change      B  Back");
 }
 
-// The 12 GameActions in Controller-screen row order, plus a 13th row for
+// The 15 GameActions in Controller-screen row order, plus a last row for
 // the (currently inert - see switch_settings.h) trigger threshold.
 constexpr GameAction kControllerActions[] = {
     GameAction::Enter,   GameAction::Back,  GameAction::Help,        GameAction::Abc,
     GameAction::Red,     GameAction::Yellow, GameAction::Blue,       GameAction::Green,
     GameAction::SaveState, GameAction::LoadState, GameAction::Rewind,
-    GameAction::Menu,
+    GameAction::Menu,    GameAction::PowerOn, GameAction::PowerOff, GameAction::Restart,
 };
 constexpr int kControllerActionCount = kGameActionCount;
-constexpr int kControllerRowCount = kControllerActionCount + 1;  // + trigger threshold
+
+// Which player's bindings the Controller screen is showing (0 or 1). Row 0
+// is always the player selector; player 1 then lists all 15 actions plus
+// the trigger threshold, player 2 only the 8 V.Smile buttons (hotkeys are
+// player 1's alone - main.cpp only ever reads them from player 1's pad).
+int g_controller_player = 0;
+
+// Player 1 also gets the port-1 device rows under the player selector:
+// Controller Type always, Keyboard Layout only while it's the keyboard.
+constexpr const char* kKeyboardLanguageKeys[] = {"us", "uk", "fr", "de", "es"};
+constexpr const char* kKeyboardLanguageNames[] = {"English (US)", "English (UK)",
+                                                  "French (AZERTY)", "German (QWERTZ)",
+                                                  "Spanish"};
+constexpr int kKeyboardLanguageCount = 5;
+bool KeyboardSelected() { return g_settings.controller_type == "keyboard"; }
+constexpr const char* kControllerTypeKeys[] = {"joystick", "keyboard", "motion", "mat"};
+constexpr const char* kControllerTypeNames[] = {"Joystick", "Smart Keyboard (USB)",
+                                                "Motion Controller (tilt)", "Dance Mat (Gym Class)"};
+constexpr int kControllerTypeCount = 4;
+// Player 2's port takes anything but the Smart Keyboard (player 1 only).
+constexpr const char* kP2ControllerTypeKeys[] = {"joystick", "motion", "mat"};
+constexpr const char* kP2ControllerTypeNames[] = {"Joystick", "Motion Controller (tilt)",
+                                                  "Dance Mat (Gym Class)"};
+constexpr int kP2ControllerTypeCount = 3;
+
+int ControllerHeaderRows() {
+  if (g_controller_player == 1) return 2;
+  return KeyboardSelected() ? 3 : 2;
+}
+
+int ControllerRowCount() {
+  return ControllerHeaderRows() +
+         (g_controller_player == 0 ? kControllerActionCount + 1 : kVsmileButtonCount);
+}
 
 // Blocks until a bindable physical button is pressed (returns its
 // switch_settings_button_name(), e.g. "A") or B cancels (returns "").
 // Same nested-blocking-loop shape as switch_dirbrowse_pick - this is called
 // synchronously from inside switch_menu_update() while binding a row, and
-// runs its own input/render/present loop until it resolves.
+// runs its own input/render/present loop until it resolves. Accepts the
+// press from either player's controller - button names are the same on
+// both, so one person can set up player 2 without swapping controllers.
 std::string CaptureButtonPress(const std::string& action_label, int viewport_w, int viewport_h) {
   // B always cancels here (matches the rest of this menu's convention), so
   // it's the one physical button this prompt can never bind to an action -
@@ -726,10 +748,10 @@ std::string CaptureButtonPress(const std::string& action_label, int viewport_w, 
                                                  "ZL", "ZR", "StickL", "StickR", "Plus", "Minus"};
   for (;;) {
     if (!appletMainLoop()) return "";
-    const SwitchInputState in = switch_input_poll();
-    if (in.down & HidNpadButton_B) return "";
+    const uint64_t down = switch_input_poll().down | switch_input_poll_p2().down;
+    if (down & HidNpadButton_B) return "";
     for (const char* name : kCapturable) {
-      if (in.down & switch_settings_button_bit(name)) return name;
+      if (down & switch_settings_button_bit(name)) return name;
     }
 
     switch_chrome_clear_background(viewport_w, viewport_h);
@@ -749,12 +771,41 @@ std::string CaptureButtonPress(const std::string& action_label, int viewport_w, 
 
 void RenderController(int viewport_w, int viewport_h) {
   switch_chrome_draw_header(viewport_w, "Controller");
+  g_controller_sel = std::min(g_controller_sel, ControllerRowCount() - 1);
   switch_chrome_draw_row_list(
-      viewport_w, viewport_h, kControllerRowCount, g_controller_sel, &g_controller_scroll,
+      viewport_w, viewport_h, ControllerRowCount(), g_controller_sel, &g_controller_scroll,
       &g_highlight_y, [&](int i, std::string& label, std::string& value) {
-        if (i < kControllerActionCount) {
-          label = switch_settings_action_label(kControllerActions[i]);
-          const std::string& bound = g_settings.action_binding[(int)kControllerActions[i]];
+        if (i == 0) {
+          label = "Player";
+          value = g_controller_player == 0 ? "Player 1" : "Player 2";
+          return;
+        }
+        if (g_controller_player == 0 && i == 1) {
+          label = "Controller Type";
+          value = kControllerTypeNames[OptionIndex(kControllerTypeKeys, kControllerTypeCount,
+                                                   g_settings.controller_type)];
+          return;
+        }
+        if (g_controller_player == 1 && i == 1) {
+          label = "Controller Type";
+          value = kP2ControllerTypeNames[OptionIndex(kP2ControllerTypeKeys, kP2ControllerTypeCount,
+                                                     g_settings.p2_controller_type)];
+          return;
+        }
+        if (g_controller_player == 0 && i == 2 && KeyboardSelected()) {
+          label = "Keyboard Layout";
+          value = kKeyboardLanguageNames[OptionIndex(kKeyboardLanguageKeys, kKeyboardLanguageCount,
+                                                     g_settings.keyboard_language)];
+          return;
+        }
+        const int row = i - ControllerHeaderRows();
+        if (g_controller_player == 1) {
+          label = switch_settings_action_label(kControllerActions[row]);
+          const std::string& bound = g_settings.p2_binding[(int)kControllerActions[row]];
+          value = bound.empty() ? "Unbound" : bound;
+        } else if (row < kControllerActionCount) {
+          label = switch_settings_action_label(kControllerActions[row]);
+          const std::string& bound = g_settings.action_binding[(int)kControllerActions[row]];
           value = bound.empty() ? "Unbound" : bound;
         } else {
           label = "Trigger Sensitivity";
@@ -762,7 +813,7 @@ void RenderController(int viewport_w, int viewport_h) {
         }
       });
   switch_chrome_draw_footer(viewport_w, viewport_h,
-                             "A  Bind      X  Unbind      <-  ->  Adjust      B  Back");
+                             "A  Bind      X  Unbind      <-  ->  Change      B  Back");
 }
 
 // BIOS and Region only take effect on the *next* VSmile::LoadGame() - a
@@ -773,13 +824,25 @@ void RenderController(int viewport_w, int viewport_h) {
 // convention VisibleLauncherRows()/VisibleGraphicsRows() already use for
 // rows that don't currently apply) whenever this screen was reached from
 // the in-game pause menu instead of the main grid.
-enum LibraryStorageRow { LS_GAME_FOLDERS, LS_BIOS, LS_REGION, LS_STORAGE, LS_RESCAN };
+enum LibraryStorageRow {
+  LS_GAME_FOLDERS, LS_BIOS, LS_BOOT_BIOS, LS_BIOS_TEST, LS_REGION, LS_VIDEO_TIMING, LS_VTECH_LOGO, LS_STORAGE, LS_RESCAN
+};
 
 std::vector<LibraryStorageRow> VisibleLibraryStorageRows() {
   std::vector<LibraryStorageRow> rows = {LS_GAME_FOLDERS};
   if (g_settings_return_to != Screen::InGamePause) {
     rows.push_back(LS_BIOS);
+    // Booting the BIOS alone (no cartridge) needs a BIOS; the Spanish Motion
+    // BIOS has no test screen (findings.md §8), so that row is hidden for it.
+    const std::string active = ActiveBiosFile(ListBiosFiles());
+    if (!active.empty()) {
+      rows.push_back(LS_BOOT_BIOS);
+      const BiosInfo info = switch_bios_identify_file(BiosPath(active));
+      if (info.family != BiosFamily::Motion || info.version != 0) rows.push_back(LS_BIOS_TEST);
+    }
     rows.push_back(LS_REGION);
+    rows.push_back(LS_VIDEO_TIMING);
+    rows.push_back(LS_VTECH_LOGO);
   }
   rows.push_back(LS_STORAGE);
   rows.push_back(LS_RESCAN);
@@ -791,11 +854,10 @@ void RenderLibraryStorage(int viewport_w, int viewport_h) {
   const auto bios_files = ListBiosFiles();
   const std::string active_bios = ActiveBiosFile(bios_files);
   const size_t folder_count = switch_settings_game_folders().size();
-  const bool is_motion_bios = !active_bios.empty() &&
-      std::find(std::begin(kMotionBiosCrc), std::end(kMotionBiosCrc),
-                ActiveBiosCrc32(active_bios)) != std::end(kMotionBiosCrc);
-  const std::string region_value =
-      std::to_string(g_settings.region) + " - " + RegionLabel(g_settings.region, is_motion_bios);
+  const BiosInfo bios = active_bios.empty() ? BiosInfo{} : switch_bios_identify_file(BiosPath(active_bios));
+  char region_hex[4];
+  snprintf(region_hex, sizeof(region_hex), "%X", g_settings.region);
+  const std::string region_value = std::string(region_hex) + " - " + RegionLabel(g_settings.region, bios);
   const auto rows = VisibleLibraryStorageRows();
   g_library_storage_sel = std::min(g_library_storage_sel, (int)rows.size() - 1);
   switch_chrome_draw_row_list(
@@ -808,11 +870,27 @@ void RenderLibraryStorage(int viewport_w, int viewport_h) {
             break;
           case LS_BIOS:
             label = "BIOS";
-            value = active_bios.empty() ? "None found (optional)" : active_bios;
+            value = active_bios.empty() ? "None found (optional)" : BiosDescription(active_bios, bios);
+            break;
+          case LS_BOOT_BIOS:
+            label = "Boot BIOS (no cartridge)";
+            value = "";
+            break;
+          case LS_BIOS_TEST:
+            label = "BIOS test screen";
+            value = "ON + OFF + RESET at power-on";
             break;
           case LS_REGION:
             label = "Region";
             value = region_value;
+            break;
+          case LS_VIDEO_TIMING:
+            label = "Video Timing";
+            value = g_settings.pal_timing ? "PAL (50 Hz)" : "NTSC (60 Hz)";
+            break;
+          case LS_VTECH_LOGO:
+            label = "VTech Logo";
+            value = g_settings.vtech_logo ? "Shown" : "Hidden (jumper)";
             break;
           case LS_STORAGE:
             label = "Storage";
@@ -824,7 +902,7 @@ void RenderLibraryStorage(int viewport_w, int viewport_h) {
             break;
         }
       });
-  switch_chrome_draw_footer(viewport_w, viewport_h, "A  Open / Rescan      <- ->  Region      B  Back");
+  switch_chrome_draw_footer(viewport_w, viewport_h, "A  Open / Change      <- ->  Change      B  Back");
 }
 
 void RenderGameFolders(int viewport_w, int viewport_h) {
@@ -860,7 +938,10 @@ void RenderBiosPicker(int viewport_w, int viewport_h) {
                                &g_bios_picker_scroll, &g_highlight_y,
                                [&](int i, std::string& label, std::string& value) {
                                  label = files[(size_t)i];
-                                 value = (files[(size_t)i] == active) ? "Active" : "";
+                                 const BiosInfo info = switch_bios_identify_file(BiosPath(files[(size_t)i]));
+                                 std::string version = info.family == BiosFamily::Unknown ? "unrecognized" : info.label;
+                                 if (info.byteswapped) version += ", byte-swapped";
+                                 value = (files[(size_t)i] == active) ? "Active - " + version : version;
                                });
   switch_chrome_draw_footer(viewport_w, viewport_h, "A  Use this BIOS      B  Back");
 }
@@ -1025,6 +1106,7 @@ MenuAction switch_menu_update(uint64_t k_down, uint64_t /*k_held*/, std::string&
         constexpr float kCrtStep = 0.05f;
         switch (rows[(size_t)g_graphics_sel]) {
           case GX_RENDERER: g_settings.accurate_renderer = !g_settings.accurate_renderer; break;
+          case GX_LEDS: g_settings.show_leds = !g_settings.show_leds; break;
           case GX_FRAMESKIP_MODE: {
             const int idx =
                 (OptionIndex(kFrameSkipModeKeys, 3, g_settings.frame_skip_mode) + dir + 3) % 3;
@@ -1090,21 +1172,72 @@ MenuAction switch_menu_update(uint64_t k_down, uint64_t /*k_held*/, std::string&
         g_highlight_y = -1.0f;
         return MenuAction::None;
       }
+      const int row_count = ControllerRowCount();
+      g_controller_sel = std::min(g_controller_sel, row_count - 1);
       if (k_down & HidNpadButton_Up) {
-        g_controller_sel = (g_controller_sel - 1 + kControllerRowCount) % kControllerRowCount;
+        g_controller_sel = (g_controller_sel - 1 + row_count) % row_count;
       } else if (k_down & HidNpadButton_Down) {
-        g_controller_sel = (g_controller_sel + 1) % kControllerRowCount;
+        g_controller_sel = (g_controller_sel + 1) % row_count;
       }
 
-      if (g_controller_sel < kControllerActionCount) {
-        const GameAction action = kControllerActions[g_controller_sel];
+      const int row = g_controller_sel - ControllerHeaderRows();
+      const bool p2 = g_controller_player == 1;
+      const uint64_t change = HidNpadButton_Left | HidNpadButton_Right | HidNpadButton_A;
+      if (g_controller_sel == 0) {
+        if (k_down & change) {
+          g_controller_player ^= 1;
+          // Row count changes with the player - switch_chrome_draw_row_list
+          // expects its scroll/highlight state reset when that happens.
+          g_controller_scroll = 0;
+          g_highlight_y = -1.0f;
+        }
+      } else if (!p2 && g_controller_sel == 1) {
+        int dir = 0;
+        if (k_down & HidNpadButton_Left) dir = -1;
+        else if (k_down & (HidNpadButton_Right | HidNpadButton_A)) dir = 1;
+        if (dir != 0) {
+          // Takes effect immediately, even mid-game: main.cpp re-plugs port 1.
+          const int n = kControllerTypeCount;
+          const int idx = OptionIndex(kControllerTypeKeys, n, g_settings.controller_type);
+          g_settings.controller_type = kControllerTypeKeys[(idx + dir + n) % n];
+          switch_settings_save();
+          g_controller_scroll = 0;  // the Keyboard Layout row comes and goes
+          g_highlight_y = -1.0f;
+        }
+      } else if (p2 && g_controller_sel == 1) {
+        if (k_down & change) {
+          // Takes effect immediately, even mid-game: main.cpp re-plugs port 2.
+          const int n = kP2ControllerTypeCount;
+          const int dir = (k_down & HidNpadButton_Left) ? -1 : 1;
+          const int idx =
+              OptionIndex(kP2ControllerTypeKeys, n, g_settings.p2_controller_type);
+          g_settings.p2_controller_type = kP2ControllerTypeKeys[(idx + dir + n) % n];
+          switch_settings_save();
+        }
+      } else if (!p2 && g_controller_sel == 2 && KeyboardSelected()) {
+        int dir = 0;
+        if (k_down & HidNpadButton_Left) dir = -1;
+        else if (k_down & (HidNpadButton_Right | HidNpadButton_A)) dir = 1;
+        if (dir != 0) {
+          const int n = kKeyboardLanguageCount;
+          const int idx = OptionIndex(kKeyboardLanguageKeys, n, g_settings.keyboard_language);
+          g_settings.keyboard_language = kKeyboardLanguageKeys[(idx + dir + n) % n];
+          switch_settings_save();
+        }
+      } else if (p2 || row < kControllerActionCount) {
+        const GameAction action = kControllerActions[row];
         if (k_down & HidNpadButton_X) {
-          switch_settings_bind(action, "");  // unbind
+          if (p2) switch_settings_bind_p2(action, "");
+          else switch_settings_bind(action, "");
         } else if (k_down & HidNpadButton_A) {
-          const std::string picked =
-              CaptureButtonPress(switch_settings_action_label(action), kViewportW, kViewportH);
+          const std::string prompt =
+              std::string(p2 ? "Player 2: " : "") + switch_settings_action_label(action);
+          const std::string picked = CaptureButtonPress(prompt, kViewportW, kViewportH);
           g_highlight_y = -1.0f;  // resync after the capture prompt's own blocking loop
-          if (!picked.empty()) switch_settings_bind(action, picked);
+          if (!picked.empty()) {
+            if (p2) switch_settings_bind_p2(action, picked);
+            else switch_settings_bind(action, picked);
+          }
         }
       } else {
         int dir = 0;
@@ -1137,6 +1270,15 @@ MenuAction switch_menu_update(uint64_t k_down, uint64_t /*k_held*/, std::string&
         g_settings.region = (g_settings.region + dir + 16) % 16;
         switch_settings_save();
       }
+      if (k_down & (HidNpadButton_Left | HidNpadButton_Right | HidNpadButton_A)) {
+        if (row == LS_VIDEO_TIMING) {
+          g_settings.pal_timing = !g_settings.pal_timing;
+          switch_settings_save();
+        } else if (row == LS_VTECH_LOGO) {
+          g_settings.vtech_logo = !g_settings.vtech_logo;
+          switch_settings_save();
+        }
+      }
       if (k_down & HidNpadButton_A) {
         if (row == LS_GAME_FOLDERS) {
           g_screen = Screen::GameFolders;
@@ -1146,6 +1288,12 @@ MenuAction switch_menu_update(uint64_t k_down, uint64_t /*k_held*/, std::string&
           g_screen = Screen::BiosPicker;
           g_bios_picker_sel = 0;
           g_highlight_y = -1.0f;
+        } else if (row == LS_BOOT_BIOS || row == LS_BIOS_TEST) {
+          out_path = switch_menu_bios_path();
+          out_slot = row == LS_BIOS_TEST ? 1 : 0;
+          g_screen = Screen::GameGrid;  // where Quit returns to
+          g_highlight_y = -1.0f;
+          return MenuAction::LaunchBios;
         } else if (row == LS_RESCAN) {
           switch_library_rescan();
           g_grid_sel = 0;

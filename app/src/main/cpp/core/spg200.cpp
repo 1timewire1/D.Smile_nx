@@ -2,6 +2,10 @@
 
 #include "state.h"
 
+#ifdef DSMILE_TEST_HOOKS
+#include <cstdio>
+#endif
+
 #ifdef DSMILE_TRACE
 #include <cstdio>
 extern FILE* g_unsp_trace;
@@ -19,9 +23,12 @@ void Spg200::SetCart(const u16* cart, u32 cart_mask, u16* art_nvram) {
   art_nvram_ = art_nvram;
 }
 
-void Spg200::Reset(bool pal) {
+void Spg200::Reset(bool pal, bool keep_ram) {
   pal_ = pal;
-  ram_.fill(0);
+  if (!keep_ram) ram_.fill(0);
+  sleeping_ = false;
+  wakeup_src_ = wakeup_time_ = sleep_keys_ = 0;
+  sleep_2hz_ = 0;
   gpio_mode_ = 0;
   std::memset(gpio_, 0, sizeof(gpio_));
   io_irq_ctrl_ = 0;
@@ -84,6 +91,7 @@ void Spg200::SaveState(StateWriter& w) const {
   w.U32(cs2_offset_);
   w.U16(dma_src_lo_); w.U16(dma_src_hi_); w.U16(dma_dst_);
   w.B(pal_);
+  w.B(sleeping_); w.U16(wakeup_src_); w.U16(wakeup_time_); w.U16(sleep_keys_); w.U32((u32)sleep_2hz_);
 }
 
 void Spg200::LoadState(StateReader& r) {
@@ -125,11 +133,44 @@ void Spg200::LoadState(StateReader& r) {
   cs2_offset_ = r.U32();
   dma_src_lo_ = r.U16(); dma_src_hi_ = r.U16(); dma_dst_ = r.U16();
   pal_ = r.B();
+  if (r.version >= 9) {
+    sleeping_ = r.B(); wakeup_src_ = r.U16(); wakeup_time_ = r.U16(); sleep_keys_ = r.U16();
+    sleep_2hz_ = (s32)r.U32();
+  } else {
+    sleeping_ = false; wakeup_src_ = wakeup_time_ = sleep_keys_ = 0; sleep_2hz_ = 0;
+  }
   UpdateIoIrqLines();
 }
 
 void Spg200::RunFrame() {
   int frame_cycles = 0;
+  if (sleeping_) {
+    // Standby: the CPU stays halted and interrupts wait. The video and
+    // audio outputs are off (games set 3D20 = 0x4006 first); the PPU/SPU
+    // still run to keep frame timing. A wakeup lets the CPU carry on
+    // right after its 0xAA55 write - the sleep code in RAM then jumps to
+    // the cart's wakeup vector (0xFFF6), which re-initialises the hardware
+    // and resumes from what's still in RAM, the same way the BIOS's own
+    // sleepmode_microcode / WAKEUP_handler do.
+    for (;;) {
+      constexpr int kChunk = 64;
+      frame_cycles += kChunk;
+      io_.RunCycles(kChunk);
+      spu_.RunCycles(kChunk);
+      if (wakeup_src_ & 0x0004) {
+        sleep_2hz_ -= kChunk;
+        if (sleep_2hz_ <= 0) sleeping_ = false;
+      }
+      if (ppu_.RunCycles(kChunk)) break;
+    }
+    // Key change: the ON button (IOB6, active low) being pressed. Only ON -
+    // pressing OFF on a console that's already off must not turn it on
+    // (RESTART needs no case here: it's the /RST line, VSmile::Restart()).
+    const u16 keys = io_.GpioIn(1) & 0x00C8;
+    if ((wakeup_src_ & 0x0080) && (sleep_keys_ & 0x0040) && !(keys & 0x0040)) sleeping_ = false;
+    sleep_keys_ = keys;  // last level seen, so it takes a fresh press
+    return;
+  }
   for (;;) {
     const int cycles = cpu_.Step();
     frame_cycles += cycles;
@@ -139,6 +180,7 @@ void Spg200::RunFrame() {
     TickTimers(cycles);
     spu_.RunCycles(cycles);
     if (ppu_.RunCycles(cycles)) break;
+    if (sleeping_) break;  // the sleep write landed: the rest of this frame is standby
   }
   // Watchdog checked once per frame.
   if (system_ctrl_ & 0x8000) {
@@ -150,8 +192,17 @@ void Spg200::RunFrame() {
   }
 }
 
+#ifdef DSMILE_TEST_HOOKS
+int g_test_rwatch_lo = -1, g_test_rwatch_hi = -1;  // print readers of this RAM range
+int g_test_wwatch_lo = -1, g_test_wwatch_hi = -1;  // print writers of this RAM range
+#endif
+
 u16 Spg200::Read(u32 addr) {
   addr &= 0x3FFFFF;
+#ifdef DSMILE_TEST_HOOKS
+  if ((int)addr >= g_test_rwatch_lo && (int)addr <= g_test_rwatch_hi)
+    std::printf("[rwatch] %04x=%04x pc=%06x\n", addr, addr < 0x2800 ? ram_[addr] : 0, cpu_.DebugPc());
+#endif
   if (addr < 0x2800) return ram_[addr];
   if (addr >= 0x4000) return ExtRead(addr);
   if (addr < 0x3000) return ppu_.Read(addr);
@@ -170,6 +221,10 @@ u16 Spg200::Read(u32 addr) {
 
 void Spg200::Write(u32 addr, u16 val) {
   addr &= 0x3FFFFF;
+#ifdef DSMILE_TEST_HOOKS
+  if ((int)addr >= g_test_wwatch_lo && (int)addr <= g_test_wwatch_hi)
+    std::printf("[wwatch] %04x<-%04x pc=%06x\n", addr, val, cpu_.DebugPc());
+#endif
   if (addr < 0x2800) { ram_[addr] = val; return; }
   if (addr >= 0x4000) { ExtWrite(addr, val); return; }
   if (addr < 0x3000) { ppu_.Write(addr, val); return; }
@@ -239,7 +294,9 @@ void Spg200::GpioWrite(int port, int reg, u16 val) {
 
 // ---------------- IO block ----------------
 
+#ifdef DSMILE_TRACE
 static int rtrace_n = 0;
+#endif
 u16 Spg200::IoRead(u32 addr) {
 #ifdef DSMILE_TRACE
   if (rtrace_n < 400) { const u16 v = IoReadInner(addr); std::printf("[rd] %04x=%04x\n", (unsigned)addr, v); rtrace_n++; return v; }
@@ -287,7 +344,7 @@ u16 Spg200::IoReadInner(u32 addr) {
     case 0x33: return uart_baud_lo_;
     case 0x34: return uart_baud_hi_;
     case 0x36: {
-      DTRACE("[uart] rxbuf-read %02x\n", uart_rx_buf_);
+      DTRACE("[uart] rxbuf-read %02x pc=%06x\n", uart_rx_buf_, cpu_.DebugPc());
       uart_status_ &= (u16)~0x0080;  // clear RX full
       return uart_rx_buf_;
     }
@@ -361,7 +418,18 @@ void Spg200::IoWrite(u32 addr, u16 val) {
       }
       return;
     }
-    case 0x28: case 0x29: case 0x2A: return;  // sleep/wakeup: ignored
+    case 0x28:
+      // 0xAA55 with sleep enabled (3D20 bit 14): enter standby - the OFF
+      // state. Games do this from code copied to RAM after the goodbye clip
+      // (Little Einsteins: 3D29 = 0x80, 3D2A = 0xC8, then 3D28 = AA55).
+      if (val == 0xAA55 && (system_ctrl_ & 0x4000)) {
+        sleeping_ = true;
+        sleep_keys_ = io_.GpioIn(1) & 0x00C8;
+        sleep_2hz_ = kSysClock / 2;
+      }
+      return;
+    case 0x29: wakeup_src_ = val; return;
+    case 0x2A: wakeup_time_ = val; return;
     case 0x2C: prng_[0] = val & 0x7FFF; return;
     case 0x2D: prng_[1] = val & 0x7FFF; return;
     case 0x2E:
@@ -381,7 +449,8 @@ void Spg200::IoWrite(u32 addr, u16 val) {
     case 0x33: uart_baud_lo_ = val & 0xFF; return;
     case 0x34: uart_baud_hi_ = val & 0xFF; return;
     case 0x35:
-      DTRACE("[uart] tx %02x (ctrl=%04x busy=%d)\n", val & 0xFF, uart_ctrl_, uart_tx_busy_);
+      DTRACE("[uart] tx %02x (ctrl=%04x busy=%d) pc=%06x\n", val & 0xFF, uart_ctrl_,
+             uart_tx_busy_, cpu_.DebugPc());
       if ((uart_ctrl_ & 0x0080) && !uart_tx_busy_) {
         uart_tx_busy_ = true;
         uart_tx_byte_ = val & 0xFF;

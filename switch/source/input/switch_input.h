@@ -1,5 +1,7 @@
 #pragma once
 #include <cstdint>
+#include <utility>
+#include <vector>
 
 // Polls the Switch pad and translates it into V.Smile joystick input: an
 // x/y pair in -5..5 (VSmileJoy::UpdateInput's convention) and an 8-bit
@@ -27,8 +29,8 @@ SwitchInputState switch_input_poll();
 // Player 2 - fully automatic, no setting (a second controller being
 // connected *is* two-player mode, checked live every frame - see
 // switch/README.md's "Two-player controller support" section). Same input
-// shape/mapping as player 1 (both physical V.Smile pads are identical, so
-// both players share one action_binding table), read from a second,
+// shape as player 1, but mapped through player 2's own p2_binding table
+// (Settings > Controller > Player 2), read from a second,
 // separately-initialized PadState (HidNpadIdType_No2, no Handheld merge -
 // handheld mode is inherently single-controller). Safe to call even with
 // nothing connected to that slot: libnx just reports no buttons held, so
@@ -57,3 +59,35 @@ SwitchInputState switch_input_poll_p2();
 // a second controller however they like (the system's own HOME-menu
 // overlay, most simply) - no in-app applet call needed at all.
 bool switch_input_player2_ready();
+
+// A USB keyboard as the V.Smile Smart Keyboard (Settings > Controller >
+// Controller Type). Keys map by physical position (USB reports positions,
+// not characters), so an AZERTY/QWERTZ keyboard lines up with the French/
+// German Smart Keyboard the same way a QWERTY one does with the US model.
+// Extra keys: Enter = OK, Esc = Quit, F1 = Help, F2/F3 = Player 1/2,
+// F4 = Symbol, F5-F8 = Red/Yellow/Blue/Green, F9 = ABC, Delete = Erase,
+// Tab = Typing Time.
+struct SwitchKeyboardInput {
+  // Smart Keyboard key code changes since the last call, in send order
+  // (Shift presses first, Shift releases last): {code, pressed}.
+  std::vector<std::pair<uint8_t, bool>> events;
+  // Held OK/Quit/Help/ABC/colours, same bit layout as SwitchInputState::buttons.
+  uint32_t buttons = 0;
+};
+// Call once per frame while the keyboard is in use; it diffs against the
+// previous call.
+SwitchKeyboardInput switch_input_poll_keyboard();
+
+// Player 1's controller accelerometer as V.Smile Motion controller readings
+// (Settings > Controller > Controller Type = Motion Controller): one byte per
+// axis, 0x80 = 0g, 0x40 per g (see VSmileJoy::UpdateMotion). x = tilt
+// left/right (roll), y = tilt forward/back, z = up/down; level and still
+// reads about 0x80, 0x80, 0xC0. Works in handheld mode, with a Pro
+// Controller, or with attached Joy-Cons (the left one's sensor).
+struct SwitchMotionInput {
+  int x = 0x80, y = 0x80, z = 0xC0;
+};
+SwitchMotionInput switch_input_poll_motion();
+// The same for player 2's controller (a Pro Controller or Joy-Con pair on
+// controller slot 2). Call after switch_input_poll_p2() in the same frame.
+SwitchMotionInput switch_input_poll_motion_p2();

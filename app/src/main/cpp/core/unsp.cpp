@@ -1,6 +1,9 @@
 #include "unsp.h"
 
 #include <bit>
+#ifdef DSMILE_TEST_HOOKS
+#include <cstdio>
+#endif
 
 #include "spg200.h"
 #include "state.h"
@@ -157,11 +160,35 @@ bool UnSP::BranchTaken(int op0) const {
   }
 }
 
+#ifdef DSMILE_TEST_HOOKS
+u32 g_test_watch_pc[16];
+int g_test_watch_count = 0;
+int g_test_watch_mem = -1;
+int g_test_watch_bpoff = -1;
+#endif
+
 int UnSP::Step() {
 #ifdef DSMILE_TRACE
   if (g_unsp_trace) fwrite(r_, 2, 8, g_unsp_trace);
 #endif
   if (CheckInterrupts()) return 10;
+#ifdef DSMILE_TEST_HOOKS
+  for (int i = 0; i < g_test_watch_count; i++) {
+    if (g_test_watch_pc[i] == CsPc()) {
+      std::printf("[watch] %06x r1=%04x r2=%04x r3=%04x r4=%04x bp=%04x", CsPc(), r_[R1], r_[R2],
+                  r_[R3], r_[R4], r_[BP]);
+      if (g_test_watch_bpoff >= 0) {
+        std::printf(" [bp+%x]=", g_test_watch_bpoff);
+        for (int k = 0; k < 2; k++) std::printf("%04x ", bus_.Read((u32)(u16)(r_[BP] + g_test_watch_bpoff + k)));
+      }
+      if (g_test_watch_mem >= 0) {
+        std::printf(" mem[%04x]=", g_test_watch_mem);
+        for (int k = 0; k < 4; k++) std::printf("%04x ", bus_.Read((u32)g_test_watch_mem + k));
+      }
+      std::printf("\n");
+    }
+  }
+#endif
 
   const u16 op = Fetch();
   const int op0 = (op >> 12) & 0xF;

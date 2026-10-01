@@ -32,6 +32,9 @@ constexpr ActionMeta kActionMeta[kGameActionCount] = {
     {"load_state", "Load State", "StickR"},
     {"rewind", "Rewind (hold)", "StickL"},
     {"menu", "Menu", "Plus"},
+    {"power_on", "Console ON", ""},
+    {"power_off", "Console OFF", ""},
+    {"restart", "Console RESTART", ""},
 };
 
 struct ButtonMeta {
@@ -158,12 +161,30 @@ void switch_settings_load() {
   g_settings.frame_skip_manual = std::max(0, std::min(10, GetInt("frame_skip_manual", 0)));
   g_settings.bios_file = GetStr("bios_file", "");
   g_settings.region = std::max(0, std::min(15, GetInt("region", 0xF)));
+  g_settings.pal_timing = GetBool("pal_timing", false);
+  g_settings.vtech_logo = GetBool("vtech_logo", true);
+  g_settings.show_leds = GetBool("show_leds", false);
 
   for (int i = 0; i < kGameActionCount; i++) {
     g_settings.action_binding[i] =
         GetStr(std::string("bind_") + kActionMeta[i].key, kActionMeta[i].default_button);
   }
   g_settings.trigger_threshold = std::max(0.05f, std::min(0.95f, GetFloat("trigger_threshold", 0.5f)));
+  for (int i = 0; i < kVsmileButtonCount; i++) {
+    g_settings.p2_binding[i] =
+        GetStr(std::string("bind2_") + kActionMeta[i].key, kActionMeta[i].default_button);
+  }
+  g_settings.controller_type = GetStr("controller_type", "joystick");
+  g_settings.p2_controller_type = GetStr("controller_type2", "joystick");
+  g_settings.keyboard_language = GetStr("keyboard_language", "us");
+}
+
+uint8_t switch_settings_keyboard_language_code() {
+  if (g_settings.keyboard_language == "uk") return 0x41;
+  if (g_settings.keyboard_language == "fr") return 0x42;
+  if (g_settings.keyboard_language == "es") return 0x43;  // not on the wiki; found by testing
+  if (g_settings.keyboard_language == "de") return 0x44;
+  return 0x40;  // us
 }
 
 void switch_settings_save() {
@@ -189,11 +210,20 @@ void switch_settings_save() {
   SetInt("frame_skip_manual", g_settings.frame_skip_manual);
   Set("bios_file", g_settings.bios_file);
   SetInt("region", g_settings.region);
+  SetBool("pal_timing", g_settings.pal_timing);
+  SetBool("vtech_logo", g_settings.vtech_logo);
+  SetBool("show_leds", g_settings.show_leds);
 
   for (int i = 0; i < kGameActionCount; i++) {
     Set(std::string("bind_") + kActionMeta[i].key, g_settings.action_binding[i]);
   }
   SetFloat("trigger_threshold", g_settings.trigger_threshold);
+  for (int i = 0; i < kVsmileButtonCount; i++) {
+    Set(std::string("bind2_") + kActionMeta[i].key, g_settings.p2_binding[i]);
+  }
+  Set("controller_type", g_settings.controller_type);
+  Set("controller_type2", g_settings.p2_controller_type);
+  Set("keyboard_language", g_settings.keyboard_language);
 
   FILE* f = fopen(kPath, "wb");
   if (!f) return;  // sdmc:/switch/dsmile/ not existing yet is not fatal here
@@ -244,6 +274,18 @@ void switch_settings_bind(GameAction action, const std::string& button_name) {
     }
   }
   g_settings.action_binding[(int)action] = button_name;
+  switch_settings_save();
+}
+
+void switch_settings_bind_p2(GameAction action, const std::string& button_name) {
+  const int idx = (int)action;
+  if (idx < 0 || idx >= kVsmileButtonCount) return;
+  if (!button_name.empty()) {
+    for (int i = 0; i < kVsmileButtonCount; i++) {
+      if (i != idx && g_settings.p2_binding[i] == button_name) g_settings.p2_binding[i] = "";
+    }
+  }
+  g_settings.p2_binding[idx] = button_name;
   switch_settings_save();
 }
 
