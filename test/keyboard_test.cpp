@@ -18,6 +18,7 @@
 //   <frame>:cb<on><off><restart>   hold console buttons, e.g. 0:cb111 (all three) / 90:cb000
 //   <frame>:leds         print the controller LED bits
 //   <frame>:sleep        print whether the console is in standby
+//   <frame>:hash         print a framebuffer hash, the CPU PC and the LEDs (freeze detection)
 //   <frame>:restart      press RESTART (hardware reset that keeps RAM)
 //   <frame>:load<path>   load a save state file (e.g. one written by :save)
 //   <frame>:end          stop
@@ -172,6 +173,8 @@ int main(int argc, char** argv) {
       g_test_watch_mem = (int)std::strtol(ev + 3, nullptr, 16);
     } else if (std::strncmp(ev, "period", 6) == 0) {  // e.g. 0:period1800000 (test builds only)
       g_test_motion_period = std::atoll(ev + 6);
+    } else if (std::strncmp(ev, "hist", 4) == 0) {  // e.g. 0:hist1 - PC history on the next watch hit(s)
+      g_test_pc_history = std::atoi(ev + 4);
     } else if (std::strncmp(ev, "watch", 5) == 0) {  // e.g. 0:watch43f27 (test builds only)
       if (g_test_watch_count < 16) g_test_watch_pc[g_test_watch_count++] = (u32)std::strtoul(ev + 5, nullptr, 16);
 #endif
@@ -191,6 +194,11 @@ int main(int argc, char** argv) {
       vs.SetConsoleButtons(ev[2] == '1', ev[3] == '1', ev[4] == '1');
     } else if (std::strcmp(ev, "restart") == 0) {  // RESTART button: hardware reset, RAM kept
       vs.Restart();
+    } else if (std::strcmp(ev, "hash") == 0) {  // fingerprint: framebuffer hash, CPU PC, LEDs
+      u32 h = 2166136261u;
+      const u16* fb = vs.Framebuffer();
+      for (int i = 0; i < 320 * 240; i++) h = (h ^ fb[i]) * 16777619u;
+      std::printf("hash %08x pc=%06x leds=%X\n", h, vs.Soc().GetCpu().DebugPc(), vs.Leds());
     } else if (std::strcmp(ev, "sleep") == 0) {  // print whether the console is in standby
       std::printf("sleeping=%d\n", vs.Sleeping() ? 1 : 0);
     } else if (std::strcmp(ev, "leds") == 0) {  // print the controller LED bits (6x commands)

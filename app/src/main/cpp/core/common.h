@@ -40,6 +40,11 @@ struct CycleClock {
   // Returns number of times the clock fired during `cycles`.
   int Tick(int cycles) {
     counter -= (s64)cycles * mul;
+    return Drain();
+  }
+  // The firing half of Tick(), for callers that charge `counter` themselves
+  // in an inline fast path and only come here once it has run out.
+  int Drain() {
     int fired = 0;
     while (counter <= 0) { counter += add; fired++; }
     return fired;

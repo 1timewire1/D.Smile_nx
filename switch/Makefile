@@ -31,7 +31,7 @@ INCLUDES	:=	source ../app/src/main/cpp/core
 
 APP_TITLE		:=	D.Smile NX
 APP_AUTHOR		:=	SenseiFromClubPenguin
-APP_VERSION		:=	1.1.0
+APP_VERSION		:=	1.2.0
 
 #---------------------------------------------------------------------------------
 # options for code generation

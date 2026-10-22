@@ -1,7 +1,30 @@
 # D.Smile - Switch port (bring-up)
 
-**1.1.0** (`Makefile` `APP_VERSION`). Everything since 1.0.1, each detailed
+**1.2.0** (`Makefile` `APP_VERSION`). Everything since 1.1.0, each detailed
 in its own section below:
+- **Performance:** the emulator core is 25-60% faster per frame, with output
+  bit-identical to before. At stock clocks Toy Story 3, Alphabet Park, Cars 2
+  and Shrek hold 60 fps (Action Mania ~59), up from ~40-43. See "Performance
+  pass (1.2.0)".
+- **Audio:** the "audio dies until reset" bug is fixed, and the output rate
+  now tracks the queue, so steady games no longer click. See "Audio: the
+  dying bug, and rate control (1.2.0)".
+- **Frame skip:** Auto now reacts to the cost of shaders and the Accurate
+  renderer too, and skipped frames are paced (Manual skip used to speed fast
+  games up). See "Frame skip: Auto counts drawing, skipped frames are paced
+  (1.2.0)".
+- **Performance overlay:** Settings > Graphics > Performance shows timings,
+  and can log every frame to a CSV for bug reports.
+- **Controllers:** mashing buttons and the stick no longer stalls the
+  joystick link; Motion controllers keep 1.1.0's link handling. See
+  "Controller link: the lost RTS edge".
+- **Carts:** German and French Shrek Forever After and Cars 2, and German and
+  Spanish Toy Story 3, now boot. See "Carts with swapped ROM halves".
+- **BIOS:** the Spanish Motion BIOS's test screen (v7.05) works, its region
+  codes are labelled from that test screen, and it shows as "Motion (Spanish
+  unit, v7.05)". See "BIOS test screen on the Spanish Motion BIOS".
+
+**1.1.0**. Everything since 1.0.1, each detailed in its own section below:
 - **Peripherals:** the Smart Keyboard (USB keyboard), the V.Smile Motion
   (tilt/swing/shake from the Switch controller's sensors, one or two
   players), and the Jammin' Gym Class dance mat.
@@ -117,10 +140,255 @@ the full history. Testing also confirmed that V.Smile Art Studio is fully
 playable with the standard controller - the drawing pad itself isn't
 emulated yet (see its own section below).
 
+## Performance pass (1.2.0)
+
+**Measured first.** Settings > Graphics > Performance got a "Shown + log" mode that writes every
+frame's timings to a CSV (below), and two builds were compared on hardware at stock clocks
+(1020 MHz CPU, handheld). The baseline spent 19-21 ms per frame in `VSmile::RunFrame()` alone,
+over the 16.7 ms budget: 40-43 fps.
+
+**Where the time went** (desktop profile, the same code): the CPU interpreter about half; the
+per-instruction upkeep of the other devices (PPU, SPU, timers, UART, ADC, controller ports, each
+checked after every instruction) about a fifth; PPU line drawing and SPU sample generation the
+rest. Every game runs ~100,000 instructions a frame - when a game's work is done it spins in a
+wait loop until the next interrupt, so the cost per frame barely depends on the game.
+
+**Changes, all in the shared core (`app/src/main/cpp/core`), all bit-exact:**
+1. **Inline fast paths** for the per-instruction device ticks (`Ppu::RunCycles`,
+   `Spu::RunCycles`, `TickTimers`, `TickUart`, `TickAdc`): the "nothing due" case is inline, the
+   rest out of line.
+2. **Next-event scheduling.** The controller ports first (`MachineIo::NextEvent`,
+   `Spg200::TickIo`), then every device (`Spg200::RunDevices`): cycles are banked and the devices
+   run only when the nearest deadline is reached, as an event-free lump plus the last instruction
+   on its own. That split is what keeps it exact: a counter running out can change what the rest
+   of the same call charges (the controller's RTS re-arm restarts its retry counter, for one).
+   Any read or write of a device register runs the banked cycles first.
+3. **Read maps:** a pointer per 1K-word page (RAM, cart, BIOS, Art Studio NVRAM), one map per CS2
+   bank, so a bus read is one lookup instead of a chain of address decodes.
+4. **Fetch:** PC increments without rewriting SR every instruction; the interrupt check is
+   skipped when no line is raised.
+5. **Wait-loop replay** (`Spg200::IdleLoop`): after a short backward jump, one pass of the loop
+   is recorded (the CPU state before each instruction, and its cycles). If the pass changed no
+   memory (rewriting a value already there is allowed), read no device register, took no
+   interrupt and came back to its starting state, later passes are identical until an interrupt
+   (devices never write RAM). So they're replayed without running the CPU, the cycles fed to the
+   devices as usual, and the CPU gets the exact boundary state back when an interrupt is due.
+   Alphabet Park spent 80% of its instructions in such a loop; Toy Story 3 about 10%.
+6. Tried and dropped: decoding whole tile rows at once in the PPU (no measurable gain).
+
+**Verification.** `test/core_digest.cpp` hashes every frame's picture, every audio sample and
+the final save state of a run. The optimized core matched the original on every ROM in
+`reference/roms` (122), and on a suite covering the joystick, Motion (including random full-range
+tilt every frame), two players, the Smart Keyboard, PAL and standby. The checker caught two
+scheduling bugs along the way (a deadline not shortened after a sync, and the event-free-lump rule
+above), both fixed before any hardware build.
+
+**Results on hardware** (stock clocks, from the logs):
+
+| Game | Before | After | `RunFrame()` before / after |
+|---|---|---|---|
+| Action Mania | 39.7 fps | 58.4-59.8 fps | 20.6 / 14.5 ms |
+| Alphabet Park Adventure | 43.2 fps | 60.0 fps | 19.3 / 7.0 ms |
+| Toy Story 3 | 42.4 fps | 60.0 fps | 19.5 / 13.3-14.1 ms |
+
+Cars 2 held 60 fps and Shrek: Dragon's Tale 59-60 fps even with the Accurate renderer and SABR or
+5xBR. Desktop: 25-35% less time per frame for busy games, 45-50% for wait-heavy ones.
+
+**Front end:**
+- The performance overlay first cost 2 ms a frame itself (`switch_ui` draws each glyph as its
+  own quad). Its text is now drawn into a texture only when it changes: 0.14 ms.
+- The game picture uploads into one of three textures in turn, so the CPU never writes one the
+  GPU may still be drawing from.
+
+**Performance overlay and log** (Settings > Graphics > Performance: Hidden / Shown / Shown +
+log): `Emu` is `RunFrame()` (average, and the worst frame), `Snap` the rewind snapshot, `Draw` the
+GL work, then frames shown per second (and, while frame skip is active, the skip level and the
+emulated rate). "Shown + log" writes `sdmc:/switch/dsmile/perf/<game>_<time>.csv`:
+- a header with the build (NRO path), game, BIOS, graphics settings and CPU/GPU/memory clocks;
+- every 5 s, a line with the clocks, the audio counters and the frame-skip level;
+- one row per frame: `emu, snap, upload, render, overlay, swap, loop`, in ms.
+
+A second overlay line shows the log's file name, or why it couldn't be opened.
+
+**Deferred: PGO.** Profile-guided optimization would likely gain another 10-20% for the
+interpreter, but a profile goes stale as the core changes, and the accuracy work next will change
+it. Better done right before a release that's about speed again.
+
+## Audio: the dying bug, and rate control (1.2.0)
+
+**The bug.** Each frame's audio went into one of four wavebufs in turn, after checking that the
+next one had finished playing. Their states only change on `audrvUpdate()`, and the only call came
+after queueing - so when a slot was still playing, `switch_audio_push()` returned without
+updating, the slot looked busy forever, and after 3 s of silence the self-heal tore down and
+re-created the whole audio driver. It took a full queue to trigger: rare while the emulator ran
+below 60 fps, routine once it kept up. Now the states are refreshed before every check, so a full
+queue costs one dropped frame of audio.
+
+**Rate control.** The console makes 60.05 frames of audio a second; the Switch shows 60 and plays
+48,000 samples, so a fixed resampling ratio let the queue drift empty (a click), and frame jitter
+swung it further. Now:
+- The resampling ratio is nudged, at most 0.5% (RetroArch's own limit; too little to hear as
+  pitch), to hold the queue near 1,600 output frames (about 33 ms). On hardware it settles at
+  about -0.1%, the frame-rate mismatch.
+- When the queue has run dry (start, after the pause menu, an underrun), one frame of silence goes
+  in ahead of the next audio, restoring headroom at once.
+- Eight wavebufs instead of four.
+
+It can't hide a game running a few percent slow (Action Mania at 58-59 fps still clicks now and
+then). Simulated over 2 minutes, steady 60 fps went from 228 underruns to 1. The perf log's
+5-second lines show `dropped`, `underruns`, `reinits`, the smoothed `level` and the `adjust`.
+
+## Frame skip: Auto counts drawing, skipped frames are paced (1.2.0)
+
+**Auto** used to look only at `RunFrame()`'s time, so a heavy shader or the Accurate renderer
+could slow a game without it reacting. Drawing time can't simply be added: when the emulator is
+ahead, the wait for vsync lands inside the GL calls. So Auto now also watches emulated frames per
+real second over each half-second window (`switch_frameskip.cpp`):
+- Below 95% speed, one more level is skipped (a game at 58 fps is better shown in full).
+- Coming back down is a probe, after 3 s at full speed; if it fails, the wait doubles, up to
+  48 s, so a needed level isn't flipped back every few seconds.
+- It never goes above what `RunFrame()`'s own cost calls for when emulation alone is too slow:
+  skipping drawing can't make that up.
+
+**Pacing.** A drawn frame is paced by the swap's wait for the display, but a skipped one wasn't:
+the next frame started at once. With Manual skip a fast game sped up, and Auto's skipping
+overfilled the audio queue (the log showed dropped audio exactly while skipping). An undrawn
+frame that finishes early now waits until one frame period after the previous frame.
+
+## BIOS test screen on the Spanish Motion BIOS
+
+The test screen row used to be hidden for the Spanish Motion BIOS, which ignores RESTART+OFF+ON.
+Disassembly found its own entry, and the harness confirmed it:
+1. Hold OFF at power-on.
+2. Press OFF about 5 more times: 10 changes, 9–15 frames apart, within about 2 s.
+
+It shows "Main Unit Test Program" **Ver 7.05**, checksums `42C5` / `4519`.
+
+`main.cpp` now plays a per-frame button script for the test-screen launch
+(`ScriptTestScreenEntry()`): RESTART+OFF+ON for the v1.0x BIOSes, the OFF sequence for the
+Spanish Motion one. The row shows for every BIOS. Details in `docs/console-type-and-bios.md`.
+Also found there: v1.03 accepts IOC5 grounded (test point TP5) in place of RESTART. **Checked on
+the harness, hardware-untested.**
+
+### Motion region labels, read from the test screen
+
+The test screen prints a "Language:" line, so every region code on the Spanish Motion BIOS was
+read directly. The labels come from that line plus the logo and the insert-cartridge prompt.
+They replace MAME's guesses in `RegionLabel()`:
+- 0: English (UK), no boot screen.
+- 1: English (US), no boot screen or prompt.
+- 2: Italian.
+- 3: English (US), no subtitle or prompt.
+- 4: English (US), no subtitle.
+- 5: English (US).
+- 6, A, E: English (UK).
+- 7: Chinese.
+- 8: **Portuguese**. MAME guessed Mexican Spanish from the "Sistema Educativo" subtitle.
+- 9: **Dutch**. MAME had a "(?)".
+- B: German.
+- C: Spanish.
+- D: French.
+- F: English (US, "Smartridge" prompt, ™ mark).
+
+Codes 5/6/A/E produce identical frames; only the test screen's tag tells them apart. The full
+per-code table is in `docs/console-type-and-bios.md`. The harness has no audio, so voice clips
+are unchecked.
+
+## Carts with swapped ROM halves
+
+*Für immer Shrek* (Germany) and *Shrek 4 - Il était une fin* (France) showed a garbled screen
+from the first frame. On the harness, the CPU ran a copy routine and then crashed into data. The
+code it was executing didn't match the ROM file, which pointed at the cartridge mapping.
+
+MAME's `vsmilem_cart.xml` explains it. These two carts are two 8 MB epoxy blobs wired to the
+opposite chip selects from the US cart, so MAME loads blob1 at `0x800000` and blob2 at 0. The
+16 MB dumps store blob1 first, so our core booted them from the wrong half.
+
+`VSmile::LoadCart()` now swaps the halves when a 16 MB dump's first half CRC is blob1 of either
+cart (`3f1c79e2` German, `bb3d3e09` French). A dump already in MAME's order doesn't match and
+loads as-is. They're the only two such carts in MAME's V.Smile lists.
+
+Checked on the harness: both reach their title screens and menus ("Lernabenteuer → Neues Spiel",
+"Jouer l'aventure → Nouvelle partie"). The US cart is unchanged. **Hardware-untested.**
+
+**Cars 2 (Germany and France) have the same fault.** Both stayed black. MAME loads these in dump
+order (`cars2mge`, `cars2mfr`), but swapping the halves boots them, so they're in the swap list
+too (first-half CRCs `8d5eeb71` German, `e9ce0620` French). Both now reach the Disney logo and the
+player/level menu ("Spieler / Spielstufe", "Nombre de joueurs / Niveau"). **Hardware-untested.**
+
+The rest of the multi-chip dumps boot as they are on the harness: Cars 2 USA and Pocket, Super
+WHY!, Toy Story 3 USA, Alphabet Park Adventure (6 MB USA Alt 2/Alt 3 and UK), Care Bears, Lion
+King, Mickey UK, Pooh USA/UK and Spider-Man UK.
+
+**Toy Story 3 (Germany, Spain) too.** Same black screen, same fix (first-half CRCs `845bbb46`,
+`a26c152a`); both match MAME, which loads them unswapped. The common French dump (`1eebefa2`)
+already boots, but MAME's French file (`2cb9d987`) is exactly that dump with the halves swapped, so
+its first half (`f1596894`) is in the list too. All reach the Learning Zone in their language.
+*Toy Story 3 (Italy) [b]* is an 8 MB single chip; with the USA upper chip it boots, in English,
+so the other Italian chip is undumped and the file can't work alone.
+
+## Controller link: the lost RTS edge
+
+**Symptom (hardware, reported):** BIOS test screen (v1.03, region F, joystick). Mashing all seven
+buttons and the analog stick froze the screen and the colour LEDs within 30–60 s.
+
+**Reproduction:** an input fuzzer on the desktop harness (`hash` event: framebuffer hash, CPU PC,
+LEDs once a second). Booting the BIOS alone into the test screen and mashing random buttons and
+stick levels for 3 minutes, 8 seeds, froze every session for 25–58 s at a time. The CPU kept
+looping in the BIOS's `wait_blank` (`0x16866`), so the program ran but no input arrived.
+
+**Cause:**
+- The console notices a controller on the *falling edge* of RTS. The BIOS's EXT1 handler
+  (`0xA9CD`, KanedaFr's disassembly) grants CTS only if no transfer is marked busy and the last
+  UART activity was at least about 8 ms ago. Otherwise it returns, without a retry.
+- Our controller raised RTS once and held it. When that edge fell in the "too early" window
+  (right after an LED byte or probe, which mashing colour buttons makes constant), nothing more
+  happened until the 0.5 s RTS timeout flushed the queue and started over.
+
+**Fix (`vsmile.cpp`, `VSmileJoy::RearmRts()`):**
+- With no CTS within 12 ms, release RTS for 1 ms and assert it again: a fresh edge.
+- Do the same when the console drops CTS while bytes are still queued.
+- The 0.5 s timeout now counts time without progress (it restarts on every byte sent) and is
+  only a last resort.
+
+**Results:**
+- The 8 fuzz sessions: longest frozen stretch 1–2 s (inputs repeating), down from 25–58 s.
+- 60 s traced: 3,665 bytes sent and read, 0 timeouts, 0 dropped, 252 re-requests.
+
+**Motion controllers keep 1.1.0's handling (after hardware testing).** Releasing RTS between
+packets broke Toy Story 3: on the harness it ignored OK on its main menu, and on hardware it kept
+saying "Please reconnect your controller". Disabling the three re-arm triggers one at a time found
+the culprit - the re-arm when CTS goes while a byte is in flight, for a Motion controller usually
+mid-report - but skipping only that still showed the disconnect icon now and then. So a Motion
+controller doesn't re-arm or retry at all, and its timeout doesn't restart per byte: exactly
+1.1.0. A 12,000-frame Toy Story 3 Motion session then matched 1.1.0 screenshot for screenshot. The
+joystick keeps the fix. Two Motion controllers are back at 1.1.0's 80 ms report gap (below).
+Cars 2 still showed a brief disconnect notice on its main screen on hardware: a test case for
+later.
+
+**What the re-arm did for two-player Motion (since reverted, above).** This was also why two
+Motion controllers lost presses and needed an 80 ms report gap. In *Shrek Forever After*'s two-player character select, both
+ports streaming:
+
+| Build | Timeouts | Reports per second, per port |
+|---|---|---|
+| Old core, 80 ms gap | after every menu press | ~8 |
+| Old core, 40 ms gap | after every menu press | 7–9 (fewer) |
+| Fixed core, 40 ms gap | only at boot | ~15 |
+
+Both players' A presses registered on the same frame. With the revert above,
+`kMotionPeriodShared` is back to 80 ms. The two-controller ID resend stays at 1 s; 250 ms cost about 2.5 reports a
+second per port.
+
+**Regression check:** all 74 carts in `reference/` cold-boot and take input with no dropped
+bytes. The only timeouts are the usual ones right after reset. The German and French *Shrek
+Forever After* dumps didn't boot on either core; that was a cartridge layout issue, now fixed (see
+"Carts with swapped ROM halves").
+
 ## Noted for later (skipped as low value)
 
-- **FPS counter overlay**: veesem's `-fps`. Cheap (`switch_ui_draw_text`
-  over the frame, like the LED overlay), but not needed so far.
+- ~~**FPS counter overlay**: veesem's `-fps`.~~ Done in 1.2.0 as the
+  Performance overlay (see "Performance pass (1.2.0)").
 - **IOC6 audio-output enable**: the wiki's "IOC6: audio output enable"
   (port C bit 6 shunts the whole audio output). The core ignores port C bit 6
   writes. Honouring it would only matter if a game deliberately mutes
@@ -719,8 +987,9 @@ only reliable signal; an unrecognized dump gets version-neutral labels.
 Source: the community wiki's hardware-tested table (vtech.pulkomandy.tk,
 page `io`, "Configuration" - documented by veesem's author in 2025; see
 `reference/findings.md` §9). It supersedes the standard-BIOS half of the
-MAME-derived table in "Region mapping" below. The Motion BIOS keeps MAME's
-labels - the wiki doesn't cover it.
+MAME-derived table in "Region mapping" below. The Spanish Motion BIOS's
+labels now come from its own test screen (see "Motion region labels, read
+from the test screen" above).
 
 | Code | v1.00 | v1.02 | v1.03 |
 |---|---|---|---|

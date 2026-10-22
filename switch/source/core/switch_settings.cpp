@@ -164,6 +164,7 @@ void switch_settings_load() {
   g_settings.pal_timing = GetBool("pal_timing", false);
   g_settings.vtech_logo = GetBool("vtech_logo", true);
   g_settings.show_leds = GetBool("show_leds", false);
+  g_settings.perf_mode = std::max(0, std::min(2, GetInt("perf_mode", 0)));
 
   for (int i = 0; i < kGameActionCount; i++) {
     g_settings.action_binding[i] =
@@ -213,6 +214,7 @@ void switch_settings_save() {
   SetBool("pal_timing", g_settings.pal_timing);
   SetBool("vtech_logo", g_settings.vtech_logo);
   SetBool("show_leds", g_settings.show_leds);
+  SetInt("perf_mode", g_settings.perf_mode);
 
   for (int i = 0; i < kGameActionCount; i++) {
     Set(std::string("bind_") + kActionMeta[i].key, g_settings.action_binding[i]);

@@ -24,8 +24,8 @@ constexpr KnownBios kKnown[] = {
     {0x11f1b416u, BiosFamily::Standard, 102, "v1.02", true},
     {0x387fbc24u, BiosFamily::Standard, 103, "v1.03", false},
     {0xdceadd42u, BiosFamily::Standard, 103, "v1.03", true},
-    {0x60fa5426u, BiosFamily::Motion, 0, "Motion (Spanish unit)", false},
-    {0xe4923747u, BiosFamily::Motion, 0, "Motion (Spanish unit)", true},
+    {0x60fa5426u, BiosFamily::Motion, 0, "Motion (Spanish unit, v7.05)", false},
+    {0xe4923747u, BiosFamily::Motion, 0, "Motion (Spanish unit, v7.05)", true},
     {0x427087eau, BiosFamily::Motion, 103, "Motion (US unit, v1.03)", false},
     {0xb98bbbc9u, BiosFamily::Motion, 103, "Motion (US unit, v1.03)", true},
 };

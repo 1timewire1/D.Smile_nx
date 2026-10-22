@@ -25,6 +25,9 @@ void switch_ui_draw_rect(float x, float y, float w, float h, float r, float g, f
 // pixel-space rect at full opacity, no cropping - the whole texture stretched
 // to fill (x,y,w,h).
 void switch_ui_draw_texture(uint32_t gl_tex, float x, float y, float w, float h);
+// The same for a texture GL rendered into (a framebuffer object), which
+// holds its top row last - switch_ui_draw_texture() would show it upside down.
+void switch_ui_draw_render_texture(uint32_t gl_tex, float x, float y, float w, float h);
 
 // (x,y) = top-left of the line. pixel_size is the glyph height in pixels;
 // glyphs are cached per exact pixel size the first time they're drawn.

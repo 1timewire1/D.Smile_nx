@@ -77,6 +77,10 @@ struct SwitchSettings {
   // Draws the controller's four colour-button lights (the console's 6x
   // commands) as an overlay in the corner, like veesem's -leds.
   bool show_leds = false;
+  // Settings > Graphics > Performance: 0 hidden, 1 timings shown in the top
+  // corner, 2 shown and logged per frame to sdmc:/switch/dsmile/perf/ (CSV,
+  // one file per play session) for measuring speed on hardware.
+  int perf_mode = 0;
 
   // Frame skip (see switch_frameskip.h) - MAME-style: off|auto|manual. In
   // "manual", frame_skip_manual (0-10, matching MAME's own frameskip range)

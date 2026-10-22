@@ -11,7 +11,15 @@ class Ppu {
   Ppu(Spg200& bus) : bus_(bus), scanline_clock_(1716) {}
 
   void Reset(bool pal);
-  bool RunCycles(int cycles);  // true when the visible frame just finished
+  // True when the visible frame just finished. Called after every CPU
+  // instruction, so the common case - no scanline boundary reached - is
+  // inline; RunScanlines() does the rest exactly as CycleClock::Tick would.
+  bool RunCycles(int cycles) {
+    scanline_clock_.counter -= (s64)cycles * scanline_clock_.mul;
+    return scanline_clock_.counter <= 0 && RunScanlines();
+  }
+  // Cycles until RunCycles() next has work (the next scanline boundary).
+  s64 CyclesToEvent() const { return scanline_clock_.counter; }
   u16 Read(u32 addr);          // 0x2800-0x2FFF
   void Write(u32 addr, u16 val);
   int CurrentLine() const { return cur_scanline_; }
@@ -36,6 +44,7 @@ class Ppu {
     u16 ch, xpos, ypos, attr;
   };
 
+  bool RunScanlines();
   void DrawLine(int line);
   void DrawBgScanline(int bg, int line);
   void DrawSpriteScanline(int sprite, int line);

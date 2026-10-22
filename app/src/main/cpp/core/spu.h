@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+
 #include "common.h"
 
 namespace dsmile {
@@ -11,7 +13,15 @@ class Spu {
   Spu(Spg200& bus) : bus_(bus), sample_clock_(96), envelope_clock_(384) {}
 
   void Reset();
-  void RunCycles(int cycles);
+  // Called after every CPU instruction; inline until a sample or envelope
+  // tick is due (every 96 / 384 cycles), then RunEvents() does the work.
+  void RunCycles(int cycles) {
+    sample_clock_.counter -= (s64)cycles * sample_clock_.mul;
+    envelope_clock_.counter -= (s64)cycles * envelope_clock_.mul;
+    if (sample_clock_.counter <= 0 || envelope_clock_.counter <= 0) RunEvents();
+  }
+  // Cycles until RunCycles() next has work (the next sample or envelope tick).
+  s64 CyclesToEvent() const { return std::min(sample_clock_.counter, envelope_clock_.counter); }
   u16 Read(u32 addr);  // 0x3000-0x37FF
   void Write(u32 addr, u16 val);
 
@@ -49,6 +59,7 @@ class Spu {
     Adpcm adpcm;
   };
 
+  void RunEvents();
   void GenerateSample();
   void TickChannel(int ch);
   void HandleEndMarker(int ch);

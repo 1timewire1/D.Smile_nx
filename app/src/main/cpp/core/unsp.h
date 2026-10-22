@@ -9,6 +9,7 @@ class Spg200;
 extern u32 g_test_watch_pc[16];  // desktop experiments: print registers when PC hits these
 extern int g_test_watch_count;
 extern int g_test_watch_mem;
+extern int g_test_pc_history;  // > 0: print the last 64 PCs on that many watch hits
 extern int g_test_watch_bpoff;  // >= 0: also print [bp+off], [bp+off+1]  // >= 0: also print 4 words from here
 #endif
 
@@ -32,6 +33,44 @@ class UnSP {
 
   void SaveState(struct StateWriter& w) const;
   void LoadState(struct StateReader& r);
+
+  // Everything Step() depends on besides memory and the interrupt lines,
+  // for Spg200's wait-loop replay.
+  struct State {
+    u16 r[8];
+    u8 sb[3];
+    bool irq, fiq, irq_enable, fiq_enable, fir_mov;
+    bool operator==(const State&) const = default;
+  };
+  State GetState() const {
+    State s;
+    std::memcpy(s.r, r_, sizeof(r_));
+    std::memcpy(s.sb, sb_, sizeof(sb_));
+    s.irq = irq_; s.fiq = fiq_;
+    s.irq_enable = irq_enable_; s.fiq_enable = fiq_enable_;
+    s.fir_mov = fir_mov_;
+    return s;
+  }
+  void SetState(const State& s) {
+    std::memcpy(r_, s.r, sizeof(r_));
+    std::memcpy(sb_, s.sb, sizeof(sb_));
+    irq_ = s.irq; fiq_ = s.fiq;
+    irq_enable_ = s.irq_enable; fiq_enable_ = s.fiq_enable;
+    fir_mov_ = s.fir_mov;
+  }
+  // Whether Step() would take an interrupt first thing from state s, given
+  // the interrupt lines now (CheckInterrupts()'s conditions).
+  bool WouldInterrupt(const State& s) const {
+    return (fiq_signal_ && !s.fiq && s.fiq_enable) || (irq_signal_ && !s.irq && s.irq_enable);
+  }
+  // Set by the last Step() if it jumped back a short way (a branch, or
+  // pc = imm16 / goto a22 1-32 words back): the hint that starts Spg200's
+  // wait-loop detection. Reading it clears it.
+  bool TakeBackJump() {
+    const bool b = back_jump_;
+    back_jump_ = false;
+    return b;
+  }
 
  private:
   enum Reg { SP = 0, R1, R2, R3, R4, BP, SR, PC };
@@ -62,6 +101,7 @@ class UnSP {
   bool fir_mov_ = true;
   u16 irq_signal_ = 0;  // level state of IRQ0..7
   bool fiq_signal_ = false;
+  bool back_jump_ = false;  // see TakeBackJump()
 };
 
 }  // namespace dsmile

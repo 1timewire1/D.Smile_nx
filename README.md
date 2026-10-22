@@ -34,6 +34,9 @@ menu chrome built for a gamepad and a TV instead of a touchscreen.
 **Play**
 - Same core, same cartridge compatibility - runs the same `.bin` dumps as
   the Android app, BIOS optional.
+- Full speed on stock clocks for most games (60 fps; the busiest run at
+  ~59), with smooth, steady audio. An optional performance overlay shows
+  the timings, and can log every frame for bug reports.
 - Save states (3 slots per game) and Rewind.
 - Cart-side NVRAM saves for the titles that use onboard save memory.
 - Real power-off: Quit turns the console off the way the OFF button does
@@ -85,6 +88,7 @@ Settings > Library & Storage.
 See [switch/README.md](switch/README.md) for full build instructions,
 current status, and everything that's actually been confirmed on real
 hardware so far.
+Planned and open work is tracked in [ROADMAP.md](ROADMAP.md).
 
 ## Android app
 

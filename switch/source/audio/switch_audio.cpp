@@ -15,7 +15,23 @@ constexpr int kVoiceId = 0;
 // One SPU frame is ~4687 input pairs -> ~800 output pairs at 48000/60; give
 // generous headroom for a slow frame or two before this would ever clip.
 constexpr int kMaxOutFrames = 4096;
-constexpr int kNumBuffers = 4;
+constexpr int kNumBuffers = 8;
+
+// Dynamic rate control. The console makes 60.05 frames of audio a second;
+// the Switch shows 60 and plays 48000 samples, so a fixed resampling ratio
+// lets the queue drift empty (a click) and timing jitter swings it further.
+// The ratio is nudged instead - at most 0.5%, too little to hear as pitch
+// (RetroArch's own rate-control limit) - to hold the queue near
+// kTargetQueued output frames: two video frames' worth, ~33 ms. That covers
+// the frame-rate mismatch and jitter; it can't hide a game running a few
+// percent slow, which still underruns now and then.
+constexpr double kTargetQueued = 1600.0;
+constexpr double kMaxRateAdjust = 0.005;
+constexpr double kLevelSmoothing = 0.02;  // per frame: follows the level over ~50 frames
+// When the queue has run dry (start, after the pause menu, an underrun), this
+// much silence goes in ahead of the next audio: headroom straight away,
+// rather than hovering at empty where every late frame is another click.
+constexpr int kPrimeFrames = 800;
 
 // Self-heal thresholds (see switch_audio_push()'s own comment for why this
 // exists): a stuck wavebuf slot or a failed init is retried automatically
@@ -40,6 +56,9 @@ AudioDriverWaveBuf s_wavebuf[kNumBuffers] = {};
 int s_next_buffer = 0;
 int s_stuck_frames = 0;
 int s_retry_cooldown = 0;
+SwitchAudioStats s_stats;
+double s_level = kTargetQueued;  // smoothed count of queued output frames
+uint64_t s_last_push_tick = 0;
 
 // Linear resampler state, carried across calls - identical algorithm to
 // Android's jni_bridge.cpp PushResampled().
@@ -56,6 +75,7 @@ bool switch_audio_init() {
   // these same values from static initialization.
   s_next_buffer = 0;
   s_stuck_frames = 0;
+  s_level = kTargetQueued;
   s_resample_pos = -1.0;
   s_prev_l = s_prev_r = 0;
 
@@ -104,6 +124,43 @@ bool switch_audio_init() {
   return s_voice_ok;
 }
 
+// Queues one wavebuf of interleaved stereo frames in the next slot - or
+// drops them if that slot is still in flight, rather than blocking the
+// render loop on it (normal, occasional backpressure). Since only that same
+// slot is ever retried, staying stuck on it far longer than a slow frame or
+// two would mean its state will never come unstuck on its own (seen on
+// hardware as audio silent until a relaunch, which re-creates the driver):
+// then re-create the driver ourselves.
+static void QueueFrames(const int16_t* frames, int count) {
+  AudioDriverWaveBuf& wb = s_wavebuf[s_next_buffer];
+  if (wb.state != AudioDriverWaveBufState_Free && wb.state != AudioDriverWaveBufState_Done) {
+    s_stats.dropped++;
+    if (++s_stuck_frames > kStuckFramesThreshold) {
+      s_stats.reinits++;
+      switch_audio_shutdown();
+      switch_audio_init();
+    }
+    return;
+  }
+  s_stuck_frames = 0;
+
+  int16_t* dst = s_buffer[s_next_buffer];
+  std::memcpy(dst, frames, count * 2 * sizeof(int16_t));
+  wb = {};
+  wb.data_pcm16 = dst;
+  wb.size = count * 2 * sizeof(int16_t);
+  wb.start_sample_offset = 0;
+  wb.end_sample_offset = count;
+  wb.is_looping = false;
+
+  armDCacheFlush(dst, count * 2 * sizeof(int16_t));
+  audrvVoiceAddWaveBuf(&s_drv, kVoiceId, &wb);
+  audrvVoiceStart(&s_drv, kVoiceId);
+  audrvUpdate(&s_drv);
+
+  s_next_buffer = (s_next_buffer + 1) % kNumBuffers;
+}
+
 void switch_audio_push(const int16_t* in, size_t in_frames) {
   // Never initialized (or an earlier self-heal attempt also failed) - rather
   // than stay silent for the rest of the process's life, retry on a cooldown
@@ -122,8 +179,43 @@ void switch_audio_push(const int16_t* in, size_t in_frames) {
   }
   if (in_frames == 0) return;
 
+  // The wavebufs' states only change on an audrvUpdate(). Before the fix
+  // for the "audio dies" bug the only call came after queueing, so a slot
+  // still playing then looked busy forever: this function returned before
+  // ever updating again, and after kStuckFramesThreshold frames (3 s of
+  // silence) the whole driver was torn down and re-created. It took a full
+  // queue to trigger, rare below 60 fps and routine once the emulator kept up.
+  audrvUpdate(&s_drv);
+  double queued = 0;  // output frames not yet played; the playing buffer counts as half
+  bool dry = true;
+  for (const AudioDriverWaveBuf& b : s_wavebuf) {
+    if (b.state == AudioDriverWaveBufState_Waiting || b.state == AudioDriverWaveBufState_Queued) {
+      queued += (double)b.end_sample_offset;
+      dry = false;
+    } else if (b.state == AudioDriverWaveBufState_Playing) {
+      queued += (double)b.end_sample_offset * 0.5;
+      dry = false;
+    }
+  }
+  const uint64_t now = armGetSystemTick();
+  if (dry) {
+    // Ran dry while being fed every frame: a gap was heard. (Not after a
+    // pause - nothing is pushed while the menu is up.)
+    if (s_last_push_tick != 0 && armTicksToNs(now - s_last_push_tick) < 100'000'000ull) s_stats.underruns++;
+    s_level = kTargetQueued;
+  } else {
+    s_level += kLevelSmoothing * (queued - s_level);
+  }
+  s_last_push_tick = now;
+  // Too much queued: take input a little faster (fewer output frames), and
+  // the reverse - full adjustment when a whole target's worth off.
+  const double adjust =
+      std::clamp((s_level - kTargetQueued) / kTargetQueued * kMaxRateAdjust, -kMaxRateAdjust, kMaxRateAdjust);
+  const double step = kInRate / kOutRate * (1.0 + adjust);
+  s_stats.level = s_level;
+  s_stats.adjust = adjust;
+
   const int in_count = (int)in_frames;
-  const double step = kInRate / kOutRate;
   int out_frames = 0;
   while (s_resample_pos < in_count - 1 && out_frames < kMaxOutFrames) {
     const int i0 = (int)std::floor(s_resample_pos);
@@ -142,42 +234,14 @@ void switch_audio_push(const int16_t* in, size_t in_frames) {
   s_resample_pos -= in_count;
 
   if (out_frames == 0) return;
-
-  AudioDriverWaveBuf& wb = s_wavebuf[s_next_buffer];
-  // Drop this frame's audio if the slot we'd reuse is still in flight,
-  // rather than blocking the render loop waiting on it - normal, occasional
-  // backpressure. But since we only ever retry the *same* slot (s_next_buffer
-  // doesn't advance below on this path), staying stuck on one slot for way
-  // longer than a slow frame or two would mean that wavebuf's state will
-  // never come unstuck on its own (observed on hardware as audio going
-  // silent until the whole app is relaunched, which re-creates the audio
-  // driver from scratch) - so if that drags on, do exactly that ourselves.
-  if (wb.state != AudioDriverWaveBufState_Free && wb.state != AudioDriverWaveBufState_Done) {
-    if (++s_stuck_frames > kStuckFramesThreshold) {
-      switch_audio_shutdown();
-      switch_audio_init();
-    }
-    return;
+  if (dry) {
+    static const int16_t kSilence[kPrimeFrames * 2] = {};
+    QueueFrames(kSilence, kPrimeFrames);
   }
-  s_stuck_frames = 0;
-
-  int16_t* dst = s_buffer[s_next_buffer];
-  std::memcpy(dst, s_scratch, out_frames * 2 * sizeof(int16_t));
-
-  wb = {};
-  wb.data_pcm16 = dst;
-  wb.size = out_frames * 2 * sizeof(int16_t);
-  wb.start_sample_offset = 0;
-  wb.end_sample_offset = out_frames;
-  wb.is_looping = false;
-
-  armDCacheFlush(dst, out_frames * 2 * sizeof(int16_t));
-  audrvVoiceAddWaveBuf(&s_drv, kVoiceId, &wb);
-  audrvVoiceStart(&s_drv, kVoiceId);
-  audrvUpdate(&s_drv);
-
-  s_next_buffer = (s_next_buffer + 1) % kNumBuffers;
+  QueueFrames(s_scratch, out_frames);
 }
+
+SwitchAudioStats switch_audio_stats() { return s_stats; }
 
 void switch_audio_shutdown() {
   if (s_voice_ok) {

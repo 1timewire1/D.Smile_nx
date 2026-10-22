@@ -21,6 +21,43 @@ void Spg200::SetCart(const u16* cart, u32 cart_mask, u16* art_nvram) {
   cart_ = cart;
   cart_mask_ = cart_mask;
   art_nvram_ = art_nvram;
+  RebuildReadMaps();
+}
+
+// Mirrors Read()/ExtRead() for a whole page: every word of a 1K-word page
+// maps to one contiguous run (RAM; or cart, BIOS or NVRAM with page-aligned
+// offsets and buffers a power of two of at least a page).
+void Spg200::RebuildReadMaps() {
+  for (int sel = 0; sel < 2; sel++) {
+    for (u32 page = 0; page < 4096; page++) {
+      const u32 addr = page << 10;
+      const u16* p = nullptr;
+      if (addr < 0x2800) p = &ram_[addr];
+      else if (addr >= 0x4000) p = ExtPage(addr, sel ? 0x400000u : 0u);
+      read_maps_[sel][page] = p;
+    }
+  }
+}
+
+const u16* Spg200::ExtPage(u32 addr, u32 cs2_offset) const {
+  auto cart = [&](u32 a) -> const u16* {
+    return (cart_ && cart_mask_ >= 0x3FF) ? &cart_[(a + cs2_offset) & cart_mask_] : nullptr;
+  };
+  switch ((extmem_ctrl_ >> 6) & 3) {
+    case 0:
+      return cart(addr);
+    case 1:
+      return cart((addr & 0x1FFFFF) + ((addr >> 21) ? 0x100000u : 0u));
+    default: {
+      const u32 a = addr & 0xFFFFF;
+      switch (addr >> 20) {
+        case 0: return cart(a);
+        case 1: return cart(a + 0x100000);
+        case 2: return art_nvram_ ? &art_nvram_[a & 0x1FFFF] : cart(a + 0x200000);
+        default: return sysrom_ ? &sysrom_[a] : nullptr;
+      }
+    }
+  }
 }
 
 void Spg200::Reset(bool pal, bool keep_ram) {
@@ -58,6 +95,7 @@ void Spg200::Reset(bool pal, bool keep_ram) {
   uart_rx_pending_ = false;
   cs2_offset_ = 0;
   dma_src_lo_ = dma_src_hi_ = dma_dst_ = 0;
+  RebuildReadMaps();
 
   ppu_.Reset(pal);
   spu_.Reset();
@@ -130,7 +168,7 @@ void Spg200::LoadState(StateReader& r) {
   uart_tx_byte_ = r.U8(); uart_tx_busy_ = r.B(); uart_tx_counter_ = (s32)r.U32();
   uart_rx_buf_ = r.U8(); uart_rx_incoming_ = r.U8(); uart_rx_pending_ = r.B();
   uart_rx_counter_ = (s32)r.U32();
-  cs2_offset_ = r.U32();
+  cs2_offset_ = r.U32() & 0x400000u;  // SetCs2()'s two values; it indexes read_maps_
   dma_src_lo_ = r.U16(); dma_src_hi_ = r.U16(); dma_dst_ = r.U16();
   pal_ = r.B();
   if (r.version >= 9) {
@@ -140,10 +178,12 @@ void Spg200::LoadState(StateReader& r) {
     sleeping_ = false; wakeup_src_ = wakeup_time_ = sleep_keys_ = 0; sleep_2hz_ = 0;
   }
   UpdateIoIrqLines();
+  RebuildReadMaps();
 }
 
 void Spg200::RunFrame() {
   int frame_cycles = 0;
+  IoChanged();  // the host may have changed the ports' input since last frame
   if (sleeping_) {
     // Standby: the CPU stays halted and interrupts wait. The video and
     // audio outputs are off (games set 3D20 = 0x4006 first); the PPU/SPU
@@ -171,17 +211,25 @@ void Spg200::RunFrame() {
     sleep_keys_ = keys;  // last level seen, so it takes a fresh press
     return;
   }
+  DevicesChanged();  // re-plan: the host may have changed anything since last frame
+  idle_mode_ = IdleMode::kSearch;
+  if (++idle_fail_age_ >= kIdleFailFrames) {
+    idle_fail_age_ = 0;
+    for (u32& head : idle_fail_head_) head = ~0u;
+  }
   for (;;) {
     const int cycles = cpu_.Step();
     frame_cycles += cycles;
-    io_.RunCycles(cycles);
-    TickUart(cycles);
-    TickAdc(cycles);
-    TickTimers(cycles);
-    spu_.RunCycles(cycles);
-    if (ppu_.RunCycles(cycles)) break;
+    dev_pending_ += cycles;
+    if (dev_pending_ >= dev_next_ && RunDevices(cycles)) break;  // see RunDevices()
     if (sleeping_) break;  // the sleep write landed: the rest of this frame is standby
+#ifdef DSMILE_IDLE_REPLAY
+    if (cpu_.TakeBackJump() && IdleLoop(frame_cycles)) break;  // see IdleLoop()
+#endif
   }
+  idle_mode_ = IdleMode::kSearch;
+  SyncDevices();  // nothing banked between frames
+  SyncIo();
   // Watchdog checked once per frame.
   if (system_ctrl_ & 0x8000) {
     watchdog_counter_ -= frame_cycles;
@@ -197,7 +245,125 @@ int g_test_rwatch_lo = -1, g_test_rwatch_hi = -1;  // print readers of this RAM 
 int g_test_wwatch_lo = -1, g_test_wwatch_hi = -1;  // print writers of this RAM range
 #endif
 
-u16 Spg200::Read(u32 addr) {
+// Wait-loop replay. Games finish a frame's work and then spin - read a RAM
+// flag, compare, jump back - until an interrupt handler changes the flag: a
+// tenth of all instructions in some games, most of them in others. After a
+// short backward jump (UnSP::TakeBackJump), one pass of the loop is
+// recorded: the CPU state before each instruction, and its cycles. If that
+// pass changed no memory (at most rewrote values already there), read no
+// device register, took no interrupt and came back to exactly the state it
+// started from, every later pass is identical until an interrupt is taken
+// (only CPU writes change RAM; devices never do). So the passes are replayed
+// - each instruction's cycles fed to the devices as usual - without running
+// the CPU, until an interrupt is due at an instruction boundary: then the
+// CPU gets that boundary's state back and Step() takes the interrupt,
+// exactly as if it had run the loop all along. True when RunFrame() should
+// stop (the frame ended, or standby began).
+bool Spg200::IdleLoop(int& frame_cycles) {
+  const u32 head = cpu_.DebugPc();
+  const int slot = IdleFailSlot(head);
+  if (idle_fail_head_[slot] == head && idle_fail_count_[slot] >= kIdleMaxFails) return false;
+  idle_head_ = head;
+  idle_len_ = 0;
+  idle_retries_ = 0;
+  idle_mode_ = IdleMode::kRecord;
+  for (;;) {
+    idle_before_ = cpu_.GetState();
+    idle_interrupt_due_ = cpu_.WouldInterrupt(idle_before_);
+    bus_wrote_ = bus_device_ = false;
+    const int cycles = cpu_.Step();
+    IdleRecord(cycles);
+    frame_cycles += cycles;
+    dev_pending_ += cycles;
+    const bool stop = (dev_pending_ >= dev_next_ && RunDevices(cycles)) || sleeping_;
+    if (stop || idle_mode_ == IdleMode::kSearch) {
+      cpu_.TakeBackJump();  // the loop's own jump: don't start over at once
+      return stop;
+    }
+    if (idle_mode_ == IdleMode::kReplay) {
+      cpu_.TakeBackJump();
+      return IdleReplay(frame_cycles);
+    }
+  }
+}
+
+// A recording failed. Not final: the first passes after an interrupt can
+// legitimately differ (the handler just changed the flag the loop copies),
+// so a head is only given up on after kIdleMaxFails.
+void Spg200::IdleReject() {
+  idle_mode_ = IdleMode::kSearch;
+  const int slot = IdleFailSlot(idle_head_);
+  if (idle_fail_head_[slot] == idle_head_) {
+    if (idle_fail_count_[slot] < 255) idle_fail_count_[slot]++;
+  } else {
+    idle_fail_head_[slot] = idle_head_;
+    idle_fail_count_[slot] = 1;
+  }
+}
+
+// One instruction of the pass just ran (devices not yet ticked for it).
+void Spg200::IdleRecord(int cycles) {
+  if (idle_interrupt_due_) {
+    idle_mode_ = IdleMode::kSearch;  // Step() took an interrupt: not the loop's doing
+    return;
+  }
+  if (bus_wrote_ || bus_device_ || idle_len_ == kIdleMaxLen) {
+    IdleReject();
+    return;
+  }
+  idle_body_[idle_len_++] = {idle_before_, cycles};
+  if (cpu_.DebugPc() != idle_head_) return;
+  if (cpu_.GetState() == idle_body_[0].state) {
+    idle_mode_ = IdleMode::kReplay;  // from the next instruction
+    idle_pos_ = 0;
+    const int slot = IdleFailSlot(idle_head_);
+    if (idle_fail_head_[slot] == idle_head_) idle_fail_count_[slot] = 0;  // a real wait: forgive its misses
+  } else if (++idle_retries_ <= 2) {
+    // Back at the start, but changed. The first pass into a wait loop often
+    // differs in its flags only (left over from the code before the loop),
+    // so record the next pass, from this state.
+    idle_len_ = 0;
+  } else {
+    IdleReject();  // still changing (a counter, say): not a wait
+  }
+}
+
+// Replays the recorded pass until an interrupt is due (false) or the frame
+// ends (true), leaving the CPU in the state of the boundary reached.
+bool Spg200::IdleReplay(int& frame_cycles) {
+  for (;;) {
+    const IdleStep& step = idle_body_[idle_pos_];
+    if (cpu_.WouldInterrupt(step.state)) {
+      cpu_.SetState(step.state);
+      idle_mode_ = IdleMode::kSearch;
+      return false;
+    }
+    frame_cycles += step.cycles;
+    dev_pending_ += step.cycles;
+    idle_pos_ = idle_pos_ + 1 == idle_len_ ? 0 : idle_pos_ + 1;
+    if (dev_pending_ >= dev_next_ && RunDevices(step.cycles)) {
+      cpu_.SetState(idle_body_[idle_pos_].state);
+      idle_mode_ = IdleMode::kSearch;
+      return true;
+    }
+  }
+}
+
+// Cycles until any device's RunCycles/Tick* next has work - mirroring each
+// one's deadline test; a counter already run out answers 1.
+s64 Spg200::NextDeviceEvent() const {
+  const auto ceil_div = [](s64 c, s64 m) { return c <= 0 ? (s64)1 : (c + m - 1) / m; };
+  s64 n = io_next_ - io_pending_;
+  n = std::min(n, ppu_.CyclesToEvent());
+  n = std::min(n, spu_.CyclesToEvent());
+  n = std::min(n, ceil_div(timebase_clock_.counter, timebase_clock_.mul));
+  if (uart_tx_busy_) n = std::min(n, (s64)uart_tx_counter_);
+  if (uart_rx_pending_) n = std::min(n, (s64)uart_rx_counter_);
+  if (adc_active_ch_ >= 0) n = std::min(n, ceil_div(adc_clock_.counter, adc_clock_.mul));
+  return std::max<s64>(n, 1);
+}
+
+u16 Spg200::ReadSlow(u32 addr) {
   addr &= 0x3FFFFF;
 #ifdef DSMILE_TEST_HOOKS
   if ((int)addr >= g_test_rwatch_lo && (int)addr <= g_test_rwatch_hi)
@@ -205,6 +371,11 @@ u16 Spg200::Read(u32 addr) {
 #endif
   if (addr < 0x2800) return ram_[addr];
   if (addr >= 0x4000) return ExtRead(addr);
+  // A device register: bring the devices up to this instruction first (see
+  // RunDevices), and re-plan after, since reads can have side effects.
+  SyncDevices();
+  DevicesChanged();
+  bus_device_ = true;  // wait-loop recording: not a pure wait
   if (addr < 0x3000) return ppu_.Read(addr);
   if (addr < 0x3800) return spu_.Read(addr);
   if ((addr & 0xFF00) == 0x3D00) return IoRead(addr);
@@ -225,8 +396,18 @@ void Spg200::Write(u32 addr, u16 val) {
   if ((int)addr >= g_test_wwatch_lo && (int)addr <= g_test_wwatch_hi)
     std::printf("[wwatch] %04x<-%04x pc=%06x\n", addr, val, cpu_.DebugPc());
 #endif
-  if (addr < 0x2800) { ram_[addr] = val; return; }
+  if (addr < 0x2800) {
+    // Wait-loop recording: rewriting the value already there (a loop that
+    // copies a flag into a local each pass) changes nothing, so it doesn't
+    // disqualify a loop; any other write does.
+    if (ram_[addr] != val) bus_wrote_ = true;
+    ram_[addr] = val;
+    return;
+  }
+  bus_wrote_ = true;
   if (addr >= 0x4000) { ExtWrite(addr, val); return; }
+  SyncDevices();     // as in ReadSlow(); a write can move any device's
+  DevicesChanged();  // next deadline (timers, UART, ADC, PPU/SPU setup)
   if (addr < 0x3000) { ppu_.Write(addr, val); return; }
   if (addr < 0x3800) { spu_.Write(addr, val); return; }
   if ((addr & 0xFF00) == 0x3D00) { IoWrite(addr, val); return; }
@@ -277,6 +458,7 @@ u16 Spg200::GpioReadData(int port) {
   const u16 buffer = gpio_[port][0], dir = gpio_[port][1];
   const u16 attrib = gpio_[port][2], mask = gpio_[port][3];
   const u16 buf = buffer ^ (dir & (u16)~attrib);
+  SyncIo();
   return (buf & dir & (u16)~mask) | (io_.GpioIn(port) & (u16)~dir & (u16)~mask);
 }
 
@@ -284,7 +466,9 @@ void Spg200::GpioResolveOut(int port) {
   const u16 buffer = gpio_[port][0], dir = gpio_[port][1];
   const u16 attrib = gpio_[port][2], mask = gpio_[port][3];
   const u16 buf = buffer ^ (dir & (u16)~attrib);
+  SyncIo();
   io_.GpioOut(port, buf & (u16)~mask, dir & (u16)~mask);
+  IoChanged();
 }
 
 void Spg200::GpioWrite(int port, int reg, u16 val) {
@@ -394,7 +578,10 @@ void Spg200::IoWrite(u32 addr, u16 val) {
       io_irq_status_ &= (u16)~val;
       UpdateIoIrqLines();
       return;
-    case 0x23: extmem_ctrl_ = val & 0x0FFE; return;
+    case 0x23:
+      extmem_ctrl_ = val & 0x0FFE;
+      RebuildReadMaps();
+      return;
     case 0x24:
       if (val == 0x55AA) watchdog_counter_ = 20250000;
       return;
@@ -424,6 +611,7 @@ void Spg200::IoWrite(u32 addr, u16 val) {
       // (Little Einsteins: 3D29 = 0x80, 3D2A = 0xC8, then 3D28 = AA55).
       if (val == 0xAA55 && (system_ctrl_ & 0x4000)) {
         sleeping_ = true;
+        SyncIo();
         sleep_keys_ = io_.GpioIn(1) & 0x00C8;
         sleep_2hz_ = kSysClock / 2;
       }
@@ -468,13 +656,15 @@ int Spg200::UartByteTime() const {
   return 16 * div * bits;
 }
 
-void Spg200::TickUart(int cycles) {
+void Spg200::TickUartBusy(int cycles) {
   if (uart_tx_busy_) {
     uart_tx_counter_ -= cycles;
     if (uart_tx_counter_ <= 0) {
       uart_tx_busy_ = false;
       uart_status_ = (uart_status_ | 0x0002) & (u16)~0x0040;  // tx_ready, !busy
+      SyncIo();
       io_.UartTx(uart_tx_byte_);
+      IoChanged();
       if (uart_ctrl_ & 0x0002) RaiseIoIrq(0x0100);
     }
   }
@@ -485,7 +675,9 @@ void Spg200::TickUart(int cycles) {
       uart_rx_buf_ = uart_rx_incoming_;
       uart_status_ |= 0x0081;  // rx_full | rx_ready
       if (uart_ctrl_ & 0x0001) RaiseIoIrq(0x0100);
+      SyncIo();
       io_.UartRxDone();  // flow-control feedback to the controller
+      IoChanged();
     }
   }
 }
@@ -498,12 +690,12 @@ void Spg200::UartRxStart(u8 byte) {
   uart_rx_counter_ = UartByteTime();
 }
 
-void Spg200::TickAdc(int cycles) {
-  if (adc_active_ch_ < 0) return;  // conversion clock only runs while active
+void Spg200::TickAdcActive(int cycles) {  // the conversion clock only runs while active
   if (adc_clock_.TickOnce(cycles)) {
     adc_div_++;
     const u32 div_mask = (1u << ((adc_ctrl_ >> 2) & 3)) - 1;
     if ((adc_div_ & div_mask) == 0) {
+      SyncIo();
       adc_data_ = (io_.AdcIn(adc_active_ch_) & 0x03FF) | 0x8000;
       adc_status_ |= 0x2000;
       adc_active_ch_ = -1;
@@ -512,8 +704,10 @@ void Spg200::TickAdc(int cycles) {
   }
 }
 
-void Spg200::TickTimers(int cycles) {
-  while (timebase_clock_.TickOnce(cycles)) {
+// TickTimers() has already charged the clock and seen it fire once. The
+// re-check charges `cycles` again, as the old while (TickOnce()) loop did.
+void Spg200::TimebaseFired(int cycles) {
+  do {
     timebase_tick_++;
     u16 bits = 0;
     if ((timebase_tick_ & 7) == 0) bits |= 0x0040;      // 4096 Hz
@@ -575,7 +769,7 @@ void Spg200::TickTimers(int cycles) {
       }
     }
     if (bits) RaiseIoIrq(bits);
-  }
+  } while (timebase_clock_.TickOnce(cycles));
 }
 
 void Spg200::RunDma(u16 len) {

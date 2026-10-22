@@ -308,6 +308,15 @@ void switch_ui_draw_texture(uint32_t gl_tex, float x, float y, float w, float h)
   DrawQuad((GLuint)gl_tex, verts);
 }
 
+void switch_ui_draw_render_texture(uint32_t gl_tex, float x, float y, float w, float h) {
+  if (!g_program || gl_tex == 0) return;
+  if (g_uAlphaOnly >= 0) glUniform1f(g_uAlphaOnly, 0.0f);
+  if (g_uMul >= 0) glUniform4f(g_uMul, 1.0f, 1.0f, 1.0f, 1.0f);
+  std::vector<Vertex> verts;
+  AppendQuadPx(verts, x, y, w, h, 0.0f, 0.0f, 1.0f, 1.0f);  // v0 is the bottom edge: GL's own row order
+  DrawQuad((GLuint)gl_tex, verts);
+}
+
 void switch_ui_draw_text(float x, float y, float pixel_size, float r, float g, float b, float a,
                           const std::string& text) {
   if (!g_program || !g_ft_face || pixel_size <= 0.0f) return;

@@ -99,6 +99,8 @@ void VSmileJoy::Reset() {
   idle_counter_ = kIdlePeriod;
   rts_timeout_ = kRtsTimeout;
   tx_start_counter_ = kTxStartDelay;
+  rts_rearm_counter_ = 0;
+  rts_retry_counter_ = kRtsRetry;
   held_repeat_counter_ = kHeldRepeatPeriod;
   kb_state_ = kKbHello;
   kb_handshake_rx_ = 0;
@@ -188,6 +190,7 @@ void VSmileJoy::QueueTx(u8 b) {
       }
     } else {
       rts_timeout_ = kRtsTimeout;
+      rts_retry_counter_ = kRtsRetry;
     }
   }
   idle_counter_ = kIdlePeriod;
@@ -200,6 +203,10 @@ void VSmileJoy::StartTx() {
   fifo_len_--;
   if (motion_packet_left_ > 0) motion_packet_left_--;  // reports sit at the fifo head
   if (fifo_len_ == 0) SetRtsActive(false);
+  // Progress: the no-grant timeout starts over - except for a Motion
+  // controller, which keeps 1.1.0's link handling (see RearmRts()).
+  if (device_ != PortDevice::Motion) rts_timeout_ = kRtsTimeout;
+  rts_retry_counter_ = kRtsRetry;
   DTRACE("[joy%d] tx %02x\n", ext_irq_line_ + 1, b);
   machine_.Soc().UartRxStart(b);
   tx_busy_ = true;
@@ -212,11 +219,37 @@ void VSmileJoy::TxDone() {
   active_ = true;
   tx_busy_ = false;
   if (cts_ && fifo_len_ > 0) StartTx();
+  else if (!cts_ && fifo_len_ > 0) RearmRts();  // CTS went while our byte was in flight
+}
+
+// The console only notices a controller wanting to send on RTS's falling edge
+// (EXT1/EXT2 interrupt). When it takes CTS away while we still hold RTS with
+// bytes queued - typically right after sending its own byte (an LED `6x`, a
+// `7x` probe, Motion `05`/`8n`/`9n`), when it raised CTS itself and our next
+// byte slipped out - there's no new edge for it to see, and both sides wait
+// until the 0.5 s RTS timeout flushes the queue. Mashing buttons and the stick
+// hit this constantly: the BIOS test screen froze for tens of seconds at a
+// time, and two streaming Motion controllers lost presses. A real controller
+// releases RTS between transfers, so do the same: release it briefly and ask
+// again, giving the console a fresh edge.
+//
+// Not for a Motion controller: its reports are multi-byte packets, and
+// letting go of RTS between them (the console drops CTS mid-report to send
+// its own 05/8n/9n) left Toy Story 3 stuck on its main menu, ignoring OK, and
+// announcing the controller disconnected. Motion keeps 1.1.0's handling.
+void VSmileJoy::RearmRts() {
+  if (device_ == PortDevice::SmartKeyboard) return;  // its handshake pulses RTS itself
+  if (device_ == PortDevice::Motion) return;
+  DTRACE("[joy%d] RTS re-arm (%d queued)\n", ext_irq_line_ + 1, fifo_len_);
+  SetRtsActive(false);
+  rts_rearm_counter_ = kRtsRearmDelay;
 }
 
 
 void VSmileJoy::SetCts(bool state) {
+  const bool dropped = cts_ && !state;
   cts_ = state;
+  if (dropped && fifo_len_ > 0 && !tx_busy_ && !tx_starting_ && !rts_idle_) RearmRts();
   if (cts_ && fifo_len_ > 0 && !tx_busy_ && !tx_starting_) {
     tx_starting_ = true;
     tx_start_counter_ = kTxStartDelay;
@@ -376,6 +409,32 @@ void VSmileJoy::QueueMatUpdates() {
   input_dirty_ = false;
 }
 
+// Mirrors RunCycles() below: every counter it would run out under the
+// current state, and 1 (run after the next instruction) for anything it does
+// on every call. Whatever changes that state from outside - CTS, console
+// bytes, TxDone, new input - is followed by a fresh NextEvent(). Too small
+// only costs speed; too large would change timing.
+s64 VSmileJoy::NextEvent() const {
+  if (device_ == PortDevice::SmartKeyboard) return 1;  // KbRunCycles() isn't covered
+  if (active_ && input_dirty_) return 1;
+  s64 n = held_repeat_counter_;
+  if (device_ == PortDevice::Motion && motion_mode_ != 0) {
+    if (motion_pause_ > 0) {
+      n = std::min(n, motion_pause_);
+    } else if (rts_idle_ && fifo_len_ == 0 && !tx_busy_ && !tx_starting_) {
+      n = std::min(n, motion_counter_);
+    }
+  }
+  if (!tx_busy_) n = std::min(n, idle_counter_);
+  if (tx_starting_) n = std::min(n, tx_start_counter_);
+  if (rts_rearm_counter_ > 0) n = std::min(n, rts_rearm_counter_);
+  if (!rts_idle_ && !cts_ && !tx_starting_ && !tx_busy_) {
+    if (fifo_len_ > 0 && device_ != PortDevice::Motion) n = std::min(n, rts_retry_counter_);
+    n = std::min(n, rts_timeout_);
+  }
+  return std::max<s64>(n, 1);
+}
+
 void VSmileJoy::RunCycles(int cycles) {
   if (device_ == PortDevice::SmartKeyboard) {
     KbRunCycles(cycles);
@@ -442,8 +501,32 @@ void VSmileJoy::RunCycles(int cycles) {
     }
   }
 
-  // Waiting for a CTS grant that never comes.
+  if (rts_rearm_counter_ > 0) {
+    rts_rearm_counter_ -= cycles;
+    if (rts_rearm_counter_ <= 0) {
+      rts_rearm_counter_ = 0;
+      if (fifo_len_ > 0 && rts_idle_) {
+        SetRtsActive(true);  // a fresh edge; rts_timeout_ keeps counting
+        rts_retry_counter_ = kRtsRetry;
+      }
+    }
+  }
+
+  // Waiting for a CTS grant. The console ignores an RTS edge it isn't ready
+  // for - the BIOS's EXT1 handler (0xA9CD) returns without granting when a
+  // transfer is marked busy or the last UART activity was under ~8 ms ago,
+  // and never comes back to it. So if no grant arrives within kRtsRetry, ask
+  // again with a fresh edge. Without this, fast input (mashing buttons and
+  // the stick) stalled the link until the 0.5 s timeout flushed the queue,
+  // over and over: the BIOS test screen froze for tens of seconds. The
+  // timeout below remains for a console that never answers.
   if (!rts_idle_ && !cts_ && !tx_starting_ && !tx_busy_) {
+    if (device_ != PortDevice::Motion) rts_retry_counter_ -= cycles;  // no re-arm for Motion (RearmRts)
+    if (rts_retry_counter_ <= 0 && fifo_len_ > 0 && device_ != PortDevice::Motion) {
+      rts_retry_counter_ = kRtsRetry;
+      RearmRts();
+      return;
+    }
     rts_timeout_ -= cycles;
     if (rts_timeout_ <= 0) {
       rts_timeout_ = kRtsTimeout;
@@ -721,6 +804,28 @@ bool VSmile::LoadCart(const u8* data, size_t size_bytes) {
   for (size_t i = 0; i < words; i++) {
     cart_[i] = (u16)(data[i * 2] | (data[i * 2 + 1] << 8));  // little-endian words
   }
+  // Two-blob 16 MB carts whose blobs sit on the opposite chip selects from
+  // the usual layout: MAME's vsmilem_cart.xml loads their blob1 at 0x800000
+  // and blob2 at 0, while the common dumps store blob1 first (they're named
+  // after MAME's blob files). Loaded as-is, the boot code runs from the wrong
+  // half and crashes in frame 0 - a garbled screen. Matched on the first
+  // half's CRC, so a dump already in MAME's order loads untouched. Cars 2
+  // DE/FR and Toy Story 3 DE/ES have the same fault, but MAME loads them in
+  // dump order (so it fails on them too); they stay black until swapped.
+  // MAME's Toy Story 3 FR is the reverse case: its single file is swapped
+  // relative to the common dump, which already boots.
+  if (size_bytes == 0x1000000) {
+    const u32 first = Crc32(data, size_bytes / 2);
+    if (first == 0x3f1c79e2u ||  // shrekfamge - Fur immer Shrek (Germany)
+        first == 0xbb3d3e09u ||  // shrekfamfr - Shrek 4 - Il etait une fin (France)
+        first == 0x8d5eeb71u ||  // cars2mge - Cars 2 (Germany)
+        first == 0xe9ce0620u ||  // cars2mfr - Cars 2 (France)
+        first == 0x845bbb46u ||  // toystor3mge - Toy Story 3 (Germany)
+        first == 0xa26c152au ||  // toystor3msp - Toy Story 3 (Spain)
+        first == 0xf1596894u) {  // toystor3mfr - Toy Story 3 (France), MAME's copy
+      std::swap_ranges(cart_.begin(), cart_.begin() + words / 2, cart_.begin() + words / 2);
+    }
+  }
   nvram_.clear();
   if (IsNvramCart(data, size_bytes)) nvram_.assign(kNvramWords, 0);
   spg_.SetCart(cart_.data(), (u32)cap - 1, nvram_.empty() ? nullptr : nvram_.data());
@@ -909,6 +1014,12 @@ void VSmile::RunCycles(int cycles) {
   joy2_.SetMotionShared(shared);
   joy_.RunCycles(cycles);
   if (joy2_connected_) joy2_.RunCycles(cycles);
+}
+
+s64 VSmile::NextEvent() {
+  s64 n = joy_.NextEvent();
+  if (joy2_connected_) n = std::min(n, joy2_.NextEvent());
+  return n;
 }
 
 }  // namespace dsmile

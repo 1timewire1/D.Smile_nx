@@ -12,3 +12,5 @@
 bool switch_render_init(int viewport_w, int viewport_h);
 void switch_render_frame(const uint16_t* framebuffer565);
 void switch_render_shutdown();
+// How long the last frame's texture upload took on the CPU, in ms.
+double switch_render_last_upload_ms();

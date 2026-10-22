@@ -12,8 +12,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <deque>
 #include <memory>
 #include <sys/stat.h>
@@ -263,6 +266,7 @@ void ApplyPortDevices(dsmile::VSmile& vs) {
 // wait for vsync, so they aren't charged.
 bool s_pal = false;
 int s_pal_credit = 0;
+double s_next_frame_due_ms = 0;  // when an undrawn (frame-skipped) frame may end - see the main loop
 
 // Controller LEDs overlay (Settings > Graphics > Controller LEDs): the four
 // colour-button lights the console sets with its 6x commands (bit 0 green,
@@ -289,6 +293,206 @@ void DrawLeds(uint8_t leds1, uint8_t leds2, bool p2) {
   glDisable(GL_BLEND);  // switch_ui_begin_frame() turns it on; the game pass expects it off
 }
 
+// Performance overlay (Settings > Graphics > Performance): per frame, the
+// emulation (RunFrame), the rewind snapshot and the GL draw, averaged - and
+// the emulation's worst frame - over half a second, plus the frame rate
+// actually shown. "Emu" against the 16.7 ms budget (20 ms PAL) is the number
+// that says whether the core keeps up.
+struct PerfStats {
+  double emu_sum = 0, emu_max = 0, snap_sum = 0, draw_sum = 0;
+  int frames = 0, shown = 0;
+  double window_start_ms = 0;
+  std::string text = "measuring...";
+
+  void Add(double emu_ms, double snap_ms, double draw_ms, bool rendered) {
+    if (window_start_ms == 0) window_start_ms = NowMs();
+    emu_sum += emu_ms;
+    emu_max = std::max(emu_max, emu_ms);
+    snap_sum += snap_ms;
+    draw_sum += draw_ms;
+    frames++;
+    if (rendered) shown++;
+    const double elapsed = NowMs() - window_start_ms;
+    if (elapsed < 500.0) return;
+    char buf[160];
+    int n = std::snprintf(buf, sizeof(buf), "Emu %.1f ms (max %.1f)  Snap %.2f  Draw %.1f  |  %.1f fps",
+                          emu_sum / frames, emu_max, snap_sum / frames, draw_sum / std::max(shown, 1),
+                          shown * 1000.0 / elapsed);
+    // Frame skip on: what's shown isn't the game's speed, so add that too.
+    const int skip = switch_frameskip_current_level();
+    if (skip > 0 && n > 0 && n < (int)sizeof(buf)) {
+      std::snprintf(buf + n, sizeof(buf) - n, "  (skip %d, %.1f emulated)", skip, frames * 1000.0 / elapsed);
+    }
+    text = buf;
+    *this = PerfStats{0, 0, 0, 0, 0, 0, NowMs(), text};
+  }
+};
+PerfStats s_perf;
+
+std::string s_nro_path;  // argv[0]: which build is running (baseline/optimized test builds)
+BiosInfo s_bios_info;    // the BIOS ReadBios() last identified, for the log header
+
+// Clock rate of a PCV module in Hz, 0 if unreadable. clkrst on 8.0.0+,
+// pcv before that.
+uint32_t ReadClockHz(PcvModule module, PcvModuleId module_id) {
+  uint32_t hz = 0;
+  if (hosversionAtLeast(8, 0, 0)) {
+    if (R_SUCCEEDED(clkrstInitialize())) {
+      ClkrstSession session;
+      if (R_SUCCEEDED(clkrstOpenSession(&session, module_id, 3))) {
+        clkrstGetClockRate(&session, &hz);
+        clkrstCloseSession(&session);
+      }
+      clkrstExit();
+    }
+  } else if (R_SUCCEEDED(pcvInitialize())) {
+    pcvGetClockRate(module, &hz);
+    pcvExit();
+  }
+  return hz;
+}
+
+std::string ClockLine() {
+  char buf[128];
+  std::snprintf(buf, sizeof(buf), "cpu=%u MHz, gpu=%u MHz, mem=%u MHz, %s",
+                ReadClockHz(PcvModule_CpuBus, PcvModuleId_CpuBus) / 1000000,
+                ReadClockHz(PcvModule_GPU, PcvModuleId_GPU) / 1000000,
+                ReadClockHz(PcvModule_EMC, PcvModuleId_EMC) / 1000000,
+                appletGetOperationMode() == AppletOperationMode_Console ? "docked" : "handheld");
+  return buf;
+}
+
+// Performance log (Performance: "Shown + log"): one CSV per play session in
+// sdmc:/switch/dsmile/perf/. "#" lines carry the setup - build, game, BIOS,
+// graphics settings, clocks (re-read every 5 s, in case a clock profile
+// changes them) - then one row per emulated frame, in ms:
+//   emu   VSmile::RunFrame()
+//   snap  the rewind snapshot (SaveState)
+//   upload   the game picture's glTexSubImage2D, within render
+//   render   switch_render_frame(): GL submission for the game picture
+//   overlay  the LED / standby / performance overlays
+//            (all three 0 when frame skip skipped drawing the frame)
+//   swap     eglSwapBuffers(), mostly the wait for vsync
+//   loop  the whole main-loop iteration, input polling to swap
+struct PerfLog {
+  FILE* file = nullptr;
+  int frame = 0;
+  double last_ms = 0;
+  std::string status;  // shown under the overlay while logging
+  bool started = false;  // Open() tried this session (a failed open isn't retried every frame)
+
+  void Open(const std::string& rom_path) {
+    started = true;
+    mkdir("sdmc:/switch/dsmile/perf", 0777);  // EEXIST is fine
+    std::string base = rom_path.substr(rom_path.find_last_of('/') + 1);
+    base = base.substr(0, base.find_last_of('.'));
+    const time_t now = time(nullptr);
+    char stamp[32];
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", localtime(&now));
+    const std::string path = "sdmc:/switch/dsmile/perf/" + base + "_" + stamp + ".csv";
+    file = std::fopen(path.c_str(), "w");
+    if (!file) {
+      status = "Log failed: " + std::string(std::strerror(errno)) + " (" + path + ")";
+      return;
+    }
+    status = "Logging to " + path.substr(path.find("perf/"));
+    static char buf[1 << 16];
+    std::setvbuf(file, buf, _IOFBF, sizeof(buf));
+    std::fprintf(file, "# build: %s\n# game: %s\n# bios: %s\n", s_nro_path.c_str(), rom_path.c_str(),
+                 s_bios_info.label[0] ? s_bios_info.label : "unrecognized");
+    std::fprintf(file, "# renderer=%s shader=%s aspect=%s background=%s bezel=%s leds=%d frameskip=%s/%d pal=%d\n",
+                 g_settings.accurate_renderer ? "accurate" : "fast", g_settings.shader_mode.c_str(),
+                 g_settings.aspect_mode.c_str(), g_settings.background_mode.c_str(), g_settings.bezel_mode.c_str(),
+                 g_settings.show_leds ? 1 : 0, g_settings.frame_skip_mode.c_str(), g_settings.frame_skip_manual,
+                 s_pal ? 1 : 0);
+    std::fprintf(file, "# clocks at frame 0: %s\nframe,emu,snap,upload,render,overlay,swap,loop\n",
+                 ClockLine().c_str());
+    std::fflush(file);  // the file and its header reach the card even if the session ends abruptly
+    frame = 0;
+    last_ms = NowMs();
+  }
+  void Close() {
+    if (file) std::fclose(file);
+    file = nullptr;
+    started = false;
+    status.clear();
+  }
+  void Row(double emu_ms, double snap_ms, double upload_ms, double render_ms, double overlay_ms, double swap_ms) {
+    if (!file) return;
+    const double now = NowMs();
+    if (frame > 0 && frame % 300 == 0) {
+      const SwitchAudioStats a = switch_audio_stats();
+      std::fprintf(file,
+                   "# clocks at frame %d: %s; audio dropped=%d underruns=%d reinits=%d level=%.0f adjust=%+.3f%%; "
+                   "frameskip=%d\n",
+                   frame, ClockLine().c_str(), a.dropped, a.underruns, a.reinits, a.level, a.adjust * 100.0,
+                   switch_frameskip_current_level());
+      std::fflush(file);  // rows reach the card every 5 s, not only when the game is left
+    }
+    std::fprintf(file, "%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n", frame, emu_ms, snap_ms, upload_ms, render_ms,
+                 overlay_ms, swap_ms, now - last_ms);
+    last_ms = now;
+    frame++;
+  }
+};
+PerfLog s_perf_log;
+
+// The overlay's text changes twice a second at most, but switch_ui draws
+// every glyph as its own textured quad - about 2 ms a frame for these two
+// lines on hardware, which skewed the very timings they show. So the text
+// is drawn into this texture only when it changes, and each frame draws
+// just the box and one quad.
+struct PerfText {
+  static constexpr int kW = kViewportW, kH = 64;
+  GLuint fbo = 0, tex = 0;
+  std::string key;  // what the texture holds
+  float width = 0;  // of its widest line
+};
+PerfText s_perf_text;
+
+void DrawPerf() {
+  constexpr float kSize = 22.0f, kPad = 8.0f, kMargin = 12.0f;
+  const std::string& log = s_perf_log.status;  // empty unless "Shown + log"
+  const int lines = log.empty() ? 1 : 2;
+  PerfText& t = s_perf_text;
+  if (!t.fbo) {
+    glGenTextures(1, &t.tex);
+    glBindTexture(GL_TEXTURE_2D, t.tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, PerfText::kW, PerfText::kH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glGenFramebuffers(1, &t.fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  }
+  const std::string key = s_perf.text + "\n" + log;
+  if (key != t.key) {
+    t.key = key;
+    t.width = std::max(switch_ui_text_width(s_perf.text, kSize), switch_ui_text_width(log, kSize));
+    glBindFramebuffer(GL_FRAMEBUFFER, t.fbo);
+    glViewport(0, 0, PerfText::kW, PerfText::kH);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    switch_ui_begin_frame(PerfText::kW, PerfText::kH);
+    // Premultiplied into the transparent texture, so it composites cleanly below.
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    switch_ui_draw_text(0, 0, kSize, 1.0f, 1.0f, 1.0f, 1.0f, s_perf.text);
+    if (!log.empty()) {
+      const bool failed = s_perf_log.file == nullptr;
+      switch_ui_draw_text(0, kSize + kPad, kSize, 1.0f, failed ? 0.4f : 0.8f, failed ? 0.4f : 0.8f, 1.0f, log);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  }
+  glViewport(0, 0, kViewportW, kViewportH);
+  switch_ui_begin_frame(kViewportW, kViewportH);
+  switch_ui_draw_rect(kMargin, kMargin, t.width + kPad * 2, kSize * lines + kPad * (lines + 1), 0.0f, 0.0f, 0.0f,
+                      0.6f);
+  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+  switch_ui_draw_render_texture(t.tex, kMargin + kPad, kMargin + kPad, PerfText::kW, PerfText::kH);
+  glDisable(GL_BLEND);
+}
+
 // Shown over the black screen while the console is off (standby) and the
 // player turned it off themselves, so it doesn't look like a hang.
 void DrawStandbyHint(bool on_bound) {
@@ -304,11 +508,28 @@ void DrawStandbyHint(bool on_bound) {
   glDisable(GL_BLEND);
 }
 
-// Frames left to hold the console's ON, OFF and RESTART buttons after a
-// "BIOS test screen" launch (Library & Storage). The BIOS checks all three
-// (active low) in its first ticks; once they're released it stays on the
-// "Main Unit Test Program" screen (findings.md §8).
-int s_console_hold_frames = 0;
+// A scripted sequence of the console's buttons, one entry per frame (bit 0
+// ON, 1 OFF, 2 RESTART), played from power-on after a "BIOS test screen"
+// launch (Library & Storage). Each BIOS has its own way in:
+// - v1.00-v1.03 (and the US "Motion" dump, which is v1.03): hold ON, OFF
+//   and RESTART at power-on, then release (BIOS showBiosScreens, 0x19317).
+// - Spanish Motion BIOS (test program v7.05): hold OFF at power-on, then
+//   press OFF about 5 more times - 10 changes, 9-15 frames apart, within its
+//   ~2 s window (0x11A16; faster is debounced away, slower times out).
+std::deque<uint8_t> s_console_script;
+
+void ScriptTestScreenEntry(const BiosInfo& info) {
+  s_console_script.clear();
+  if (info.family == BiosFamily::Motion && info.version == 0) {
+    for (int i = 0; i < 5; i++) s_console_script.push_back(2);
+    for (int k = 0; k < 12; k++) {
+      for (int i = 0; i < 12; i++) s_console_script.push_back(k % 2 == 0 ? 0 : 2);
+    }
+  } else {
+    for (int i = 0; i < 59; i++) s_console_script.push_back(7);
+  }
+  s_console_script.push_back(0);
+}
 
 // Scripted presses of the console's ON / OFF buttons, in frames left: ON
 // after resuming a saved standby, OFF when the pause menu's Quit turns the
@@ -324,10 +545,12 @@ bool s_bios_only = false;
 
 // Reads a BIOS dump, fixing a known byte-swapped one (the core reads
 // little-endian words, so a swapped file won't boot). Sets s_motion_bios.
-bool ReadBios(const std::string& path, std::vector<uint8_t>& bios) {
+bool ReadBios(const std::string& path, std::vector<uint8_t>& bios, BiosInfo* out_info = nullptr) {
   s_motion_bios = false;
   if (path.empty() || !LoadFile(path.c_str(), bios)) return false;
   const BiosInfo info = switch_bios_identify_crc(switch_bios_crc32(bios.data(), bios.size()));
+  if (out_info) *out_info = info;
+  s_bios_info = info;
   switch_bios_fix_byte_order(bios, info);
   s_motion_bios = info.family == BiosFamily::Motion;
   return true;
@@ -339,7 +562,8 @@ bool ReadBios(const std::string& path, std::vector<uint8_t>& bios) {
 // its insert-a-cartridge screen, or its test screen with `test_screen`.
 std::unique_ptr<dsmile::VSmile> LoadBiosOnly(const std::string& bios_path, bool test_screen) {
   std::vector<uint8_t> bios;
-  if (!ReadBios(bios_path, bios) || bios.size() < 2) return nullptr;
+  BiosInfo info;
+  if (!ReadBios(bios_path, bios, &info) || bios.size() < 2) return nullptr;
   constexpr size_t kBankBytes = 0x200000;  // 1M words
   std::vector<uint8_t> mirrored(kBankBytes * 4, 0);
   for (size_t bank = 0; bank < 4; bank++) {
@@ -356,7 +580,8 @@ std::unique_ptr<dsmile::VSmile> LoadBiosOnly(const std::string& bios_path, bool 
   s_pal = g_settings.pal_timing;  // Settings > Library & Storage > Video Timing
   switch_frameskip_set_pal(s_pal);
   vs->Reset(s_pal);
-  s_console_hold_frames = test_screen ? 60 : 0;
+  if (test_screen) ScriptTestScreenEntry(info);
+  else s_console_script.clear();
   s_bios_only = true;
   s_press_on = s_press_off = 0;
   return vs;
@@ -373,7 +598,7 @@ std::unique_ptr<dsmile::VSmile> LoadGame(const std::string& rom_path) {
 
   std::vector<uint8_t> bios;
   if (ReadBios(switch_menu_bios_path(), bios)) vs->LoadSysrom(bios.data(), bios.size());
-  s_console_hold_frames = 0;
+  s_console_script.clear();
 
   vs->SetVtechLogo(g_settings.vtech_logo);  // Settings > Library & Storage > VTech Logo
   vs->SetAccurate(g_settings.accurate_renderer);  // Settings > Graphics > Renderer
@@ -486,7 +711,8 @@ bool LoadStateFromSlot(dsmile::VSmile& vs, const std::string& rom_path, int slot
 
 void switch_present() { eglSwapBuffers(s_display, s_surface); }
 
-int main(int, char**) {
+int main(int argc, char** argv) {
+  if (argc > 0 && argv[0]) s_nro_path = argv[0];
   if (!InitEgl(nwindowGetDefault(), kViewportW, kViewportH)) {
     RunConsoleErrorLoop("EGL init failed.");
     return EXIT_FAILURE;
@@ -517,6 +743,7 @@ int main(int, char**) {
   std::deque<std::vector<uint8_t>> rewind_buffer;  // valid while vs is - see kRewindMax's comment
 
   while (appletMainLoop()) {
+    if (!vs) s_perf_log.Close();  // the play session that owned the log has ended
     const SwitchInputState in = switch_input_poll();
 
     if (state == AppState::RomList) {
@@ -747,9 +974,10 @@ int main(int, char**) {
       }
       if (s_press_on > 0) s_press_on--;
       if (s_press_off > 0) s_press_off--;
-      if (s_console_hold_frames > 0) {
-        const bool hold = --s_console_hold_frames > 0;
-        vs->SetConsoleButtons(hold, hold, hold);
+      if (!s_console_script.empty()) {
+        const uint8_t b = s_console_script.front();
+        s_console_script.pop_front();
+        vs->SetConsoleButtons(b & 1, b & 2, b & 4);
       } else {
         vs->SetConsoleButtons(on, off, false);
       }
@@ -762,7 +990,8 @@ int main(int, char**) {
       }
       const double run_frame_start_ms = NowMs();
       vs->RunFrame();
-      switch_frameskip_record_frame_time(NowMs() - run_frame_start_ms);
+      const double emu_ms = NowMs() - run_frame_start_ms;
+      switch_frameskip_record_frame_time(emu_ms);
 
       // Quit's power-off: once the game has put the console into standby,
       // keep that state for the next launch and leave. If it never does
@@ -781,26 +1010,61 @@ int main(int, char**) {
 
       // Push this frame's snapshot *after* it ran (matches jni_bridge.cpp's
       // Loop() exactly - see kRewindMax's comment above).
+      const double snap_start_ms = NowMs();
       rewind_buffer.emplace_back();
       vs->SaveState(rewind_buffer.back());
       if (rewind_buffer.size() > kRewindMax) rewind_buffer.pop_front();
+      const double snap_ms = NowMs() - snap_start_ms;
 
       {
         const int n = vs->DrainAudio(g_spu_buf, kSpuBufMax);
         switch_audio_push(g_spu_buf, n / 2);  // no-ops/self-heals internally if audio isn't up
       }
 
-      if (switch_frameskip_should_render()) {
+      const bool render = switch_frameskip_should_render();
+      double draw_ms = 0, render_ms = 0, swap_ms = 0;
+      if (render) {
+        const double draw_start_ms = NowMs();
         switch_render_frame(vs->Framebuffer());
+        render_ms = NowMs() - draw_start_ms;
         if (g_settings.show_leds) DrawLeds(vs->Leds(), vs->Leds2(), p2_connected);
         if (vs->Sleeping() && !s_powering_off) DrawStandbyHint(on_bit != 0);
+        if (g_settings.perf_mode != 0) DrawPerf();
+        draw_ms = NowMs() - draw_start_ms;  // GL submission, not the vsync wait in the swap
+        const double swap_start_ms = NowMs();
         eglSwapBuffers(s_display, s_surface);
+        swap_ms = NowMs() - swap_start_ms;
         if (s_pal) s_pal_credit -= 1;  // this frame (-6) plus this refresh (+5)
+      }
+      // A drawn frame is paced by the swap's wait for the display; one frame
+      // skip leaves undrawn isn't, so the next frame used to start at once.
+      // A run of those got ahead of real time: Manual skip sped fast games
+      // up, and Auto's skipping overfilled the audio queue (dropped audio).
+      // So an undrawn frame that finishes early waits for its slot: one
+      // frame period after the previous frame's. Running behind, nothing
+      // waits and the schedule starts over.
+      {
+        const double period = s_pal ? 20.0 : 1000.0 / 60.0;
+        const double now = NowMs();
+        if (!render && now < s_next_frame_due_ms) {
+          svcSleepThread((int64_t)((s_next_frame_due_ms - now) * 1e6));
+          s_next_frame_due_ms += period;
+        } else {
+          s_next_frame_due_ms = now + period;
+        }
+      }
+      if (g_settings.perf_mode != 0) s_perf.Add(emu_ms, snap_ms, draw_ms, render);
+      if (g_settings.perf_mode == 2) {
+        if (!s_perf_log.started) s_perf_log.Open(current_rom_path);
+        s_perf_log.Row(emu_ms, snap_ms, render ? switch_render_last_upload_ms() : 0, render_ms, draw_ms - render_ms, swap_ms);
+      } else {
+        s_perf_log.Close();
       }
     }
   }
 
   if (vs) FlushNvram(*vs, current_rom_path);  // e.g. quitting via HOME/power while still playing
+  s_perf_log.Close();
   vs.reset();
   switch_audio_shutdown();
   switch_menu_shutdown();

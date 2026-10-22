@@ -91,9 +91,9 @@ void Ppu::LoadState(StateReader& r) {
   UpdateIrq();
 }
 
-bool Ppu::RunCycles(int cycles) {
+bool Ppu::RunScanlines() {
   bool frame_finished = false;
-  const int fired = scanline_clock_.Tick(cycles);
+  const int fired = scanline_clock_.Drain();
   for (int i = 0; i < fired; i++) {
     if (cur_scanline_ == irq_vpos_ && (irq_ctrl_ & 2)) {
       irq_status_ |= 2;
@@ -409,7 +409,11 @@ void Ppu::DrawTileLine(int screen_y, int x_start, u32 line_addr, int tile_w, uns
                        bool hflip, unsigned bpp, bool blend) {
   int pixbuf_shift = -(int)bpp;
   u32 pixbuf = 0;
-  u32 addr = line_addr + (hflip ? ((tile_w * bpp) / 16 - 1) : 0);
+  const u32 words = (u32)(tile_w * (int)bpp) / 16;
+  u32 addr = line_addr + (hflip ? (words - 1) : 0);
+  // The row's words straight from memory when they're plain ROM/RAM in one
+  // page - nearly always - instead of a bus call per word.
+  const u16* row = bus_.ReadRun(line_addr, words);
 
   // Skip bus reads that contain only offscreen pixels.
   const int left_offscreen = x_start < 0 ? -x_start : 0;
@@ -426,7 +430,8 @@ void Ppu::DrawTileLine(int screen_y, int x_start, u32 line_addr, int tile_w, uns
   for (int screen_x = x_start + skipped_pixels; screen_x < x_start + tile_w && screen_x < 320;
        screen_x++) {
     if (pixbuf_shift < 0) {
-      u16 val = bus_.Read(addr);
+      const u32 i = addr - line_addr;
+      u16 val = (row && i < words) ? row[i] : bus_.Read(addr);
       addr += hflip ? -1 : 1;
       if (bpp != 16) val = (u16)((val >> 8) | (val << 8));
       pixbuf = hflip ? ((u32)val << 16) | (pixbuf >> 16) : (pixbuf << 16) | val;

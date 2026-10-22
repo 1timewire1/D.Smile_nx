@@ -49,7 +49,11 @@ class VSmileJoy {
 
   void Reset();
   void RunCycles(int cycles);
+  // How long RunCycles() can be put off: its nearest counter deadline in the
+  // current state, never later than the real one (see Spg200::TickIo).
+  s64 NextEvent() const;
   void SetCts(bool state);            // console -> controller select
+  void RearmRts();
   // console -> controller byte (via UART TX). The console's UART line is
   // shared by both ports; `selected` is whether this port's CTS is raised.
   void Rx(u8 byte, bool selected);
@@ -122,6 +126,8 @@ class VSmileJoy {
   s64 idle_counter_ = kIdlePeriod;
   s64 rts_timeout_ = kRtsTimeout;
   s64 tx_start_counter_ = kTxStartDelay;
+  s64 rts_rearm_counter_ = 0;  // > 0: RTS released, re-request the line when it runs out
+  s64 rts_retry_counter_ = kRtsRetry;  // re-request the line if no CTS by then
   // Not serialized: phase only, safe to restart on load.
   s64 held_repeat_counter_ = kHeldRepeatPeriod;
 
@@ -144,6 +150,8 @@ class VSmileJoy {
   static constexpr s64 kIdlePeriod = 27000000;      // 1 s keepalive
   static constexpr s64 kRtsTimeout = 13500000;      // 0.5 s grant timeout
   static constexpr s64 kTxStartDelay = 97200;       // 3.6 ms after CTS
+  static constexpr s64 kRtsRearmDelay = 27000;      // 1 ms RTS release before asking again
+  static constexpr s64 kRtsRetry = 324000;          // 12 ms without CTS: ask again
   static constexpr s64 kHeldRepeatPeriod = 2700000; // 0.1 s mode-0 auto-repeat
   static constexpr s64 kKbHelloPeriod = 8100000;    // 300 ms between hellos
   static constexpr s64 kKbHelloWindow = 329400;     // 12.2 ms RTS pulse
@@ -160,7 +168,14 @@ class VSmileJoy {
   static constexpr s64 kMotionPause = 810000;     // 30 ms
   s64 motion_id_period_ = kMotionIdPeriodAlone;
   s64 motion_period_ = kMotionPeriod;
-  static constexpr s64 kMotionPeriodShared = 2160000;     // 80 ms with two controllers
+  // Two streaming controllers need half the report rate (80 ms): at 40 ms
+  // the console stalls after nearly every exchange. The RTS re-arm (see
+  // RearmRts()) lifted that, but it broke Toy Story 3's Motion controls, so
+  // Motion controllers don't re-arm and this stays as in 1.1.0. The ID goes
+  // out only once a second with two: every 56 makes the console redo its
+  // Motion setup (05/8n/9n), and at 250 ms that cost each port ~2.5 reports
+  // a second.
+  static constexpr s64 kMotionPeriodShared = 2160000;
   static constexpr s64 kMotionIdPeriodAlone = 6750000;    // 250 ms
   static constexpr s64 kMotionIdPeriodShared = 27000000;  // 1 s with two controllers
   static constexpr int kUnsent = 99;  // sent_x_/sent_y_ "never sent": forces a resend
@@ -278,6 +293,7 @@ class VSmile : public MachineIo {
   }
   u16 AdcIn(int ch) override;
   void RunCycles(int cycles) override;
+  s64 NextEvent() override;
 
   // Used by VSmileJoy
   Spg200& Soc() { return spg_; }

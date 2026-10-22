@@ -53,9 +53,9 @@ void UnSP::Reset() {
 }
 
 inline u16 UnSP::Fetch() {
-  const u32 a = CsPc();
-  const u16 v = bus_.Read(a);
-  SetCsPc(a + 1);
+  const u16 v = bus_.Read(CsPc());
+  // SetCsPc(CsPc() + 1), touching SR's CS bits only when PC wraps.
+  if (++r_[PC] == 0) r_[SR] = (r_[SR] & 0xFFC0) | ((r_[SR] + 1) & 0x3F);
   return v;
 }
 
@@ -165,16 +165,26 @@ u32 g_test_watch_pc[16];
 int g_test_watch_count = 0;
 int g_test_watch_mem = -1;
 int g_test_watch_bpoff = -1;
+int g_test_pc_history = 0;  // > 0: on a watch hit, print the last 64 PCs (this many times)
+static u32 s_pc_ring[64];
+static unsigned s_pc_ring_pos = 0;
 #endif
 
 int UnSP::Step() {
 #ifdef DSMILE_TRACE
   if (g_unsp_trace) fwrite(r_, 2, 8, g_unsp_trace);
 #endif
-  if (CheckInterrupts()) return 10;
+  if ((irq_signal_ || fiq_signal_) && CheckInterrupts()) return 10;  // nothing to take, most of the time
 #ifdef DSMILE_TEST_HOOKS
+  s_pc_ring[s_pc_ring_pos++ & 63] = CsPc();
   for (int i = 0; i < g_test_watch_count; i++) {
     if (g_test_watch_pc[i] == CsPc()) {
+      if (g_test_pc_history > 0) {
+        g_test_pc_history--;
+        std::printf("[history]");
+        for (unsigned k = 0; k < 64; k++) std::printf(" %06x", s_pc_ring[(s_pc_ring_pos + k) & 63]);
+        std::printf("\n");
+      }
       std::printf("[watch] %06x r1=%04x r2=%04x r3=%04x r4=%04x bp=%04x", CsPc(), r_[R1], r_[R2],
                   r_[R3], r_[R4], r_[BP]);
       if (g_test_watch_bpoff >= 0) {
@@ -222,6 +232,7 @@ int UnSP::Step() {
       case 2:  // JMPF (goto a22) when rd==PC, else MULS us
         if (rd == PC) {
           const u32 new_pc = ((u32)imm6 << 16) | Fetch();
+          if (CsPc() - new_pc - 1 < 32) back_jump_ = true;
           SetCsPc(new_pc);
           return 5;
         }
@@ -345,7 +356,10 @@ int UnSP::Step() {
     case 1:  // imm6, or branch backward when rd==PC
       if (rd == PC) {
         const bool taken = BranchTaken(op0);
-        if (taken) SetCsPc(CsPc() - imm6);
+        if (taken) {
+          SetCsPc(CsPc() - imm6);
+          back_jump_ = true;
+        }
         return taken ? 4 : 2;
       } else {
         if (op0 != STORE) AluOp(r_[rd], r_[rd], imm6, op0, rd != PC);
@@ -406,7 +420,11 @@ int UnSP::Step() {
         case 1: {  // Rd = Rs op imm16
           const u16 rs_val = r_[rs];
           const u16 imm = Fetch();
-          if (op0 != STORE) AluOp(r_[rd], rs_val, imm, op0, rd != PC);
+          if (op0 != STORE) {
+            const u16 from = r_[PC];
+            AluOp(r_[rd], rs_val, imm, op0, rd != PC);
+            if (rd == PC && (u16)(from - r_[PC] - 1) < 32) back_jump_ = true;  // pc = imm16, 1-32 back
+          }
           return rd == PC ? 5 : 4;
         }
         case 2: {  // Rd = Rs op [A16]

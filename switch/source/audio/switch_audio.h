@@ -12,3 +12,14 @@
 bool switch_audio_init();
 void switch_audio_push(const int16_t* interleaved_stereo, size_t in_frames);
 void switch_audio_shutdown();
+
+// Counters since start, for the performance log: frames of audio dropped
+// because all wavebufs were still queued, frames that found the queue empty
+// (an underrun: a gap was heard), and self-heal re-inits.
+// Also the rate control's current state: the smoothed queue level (output
+// frames) and the resampling adjustment it's applying.
+struct SwitchAudioStats {
+  int dropped = 0, underruns = 0, reinits = 0;
+  double level = 0, adjust = 0;
+};
+SwitchAudioStats switch_audio_stats();

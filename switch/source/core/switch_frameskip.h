@@ -17,10 +17,12 @@
 //            before this feature existed).
 //   manual - always skip g_settings.frame_skip_manual out of every
 //            (N+1) frames, evenly spaced.
-//   auto   - same idea, but N is instead adjusted automatically based on
-//            how long VSmile::RunFrame() has actually been taking, so it
-//            tracks whatever the current game/hardware/other settings
-//            (e.g. Accurate renderer, CRT shader) actually cost right now.
+//   auto   - same idea, but N is adjusted automatically: at least what
+//            VSmile::RunFrame()'s own cost calls for, and more whenever the
+//            game actually runs below 95% speed (emulated frames per real
+//            second), so a heavy shader or the Accurate renderer counts too.
+//            Lower levels are re-tried now and then (see
+//            switch_frameskip.cpp).
 
 // Resets all timing history and the auto-adjusted level back to "no skip
 // assumed yet" - call whenever gameplay resumes after a gap that isn't
@@ -34,7 +36,8 @@ void switch_frameskip_set_pal(bool pal);
 
 // Call once per frame with how long VSmile::RunFrame() actually took (just
 // that call - not audio/render/present), in milliseconds. Feeds the
-// rolling average auto mode reevaluates against periodically.
+// rolling average auto mode reevaluates against periodically, and times
+// the frames per real second.
 void switch_frameskip_record_frame_time(double run_frame_ms);
 
 // Call once per frame, after switch_frameskip_record_frame_time(), to

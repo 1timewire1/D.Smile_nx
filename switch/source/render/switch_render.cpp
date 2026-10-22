@@ -4,6 +4,7 @@
 #include <cstdio>
 
 #include <glad/glad.h>
+#include <switch.h>
 
 #include "core/switch_settings.h"
 
@@ -879,7 +880,14 @@ GLint g_bg_uMode = -1;
 GLint g_bezel_uMat = -1, g_bezel_uInner = -1;
 
 GLuint g_vao = 0, g_vbo = 0;
-GLuint g_tex = 0;
+// The game picture, uploaded every frame. Three textures in rotation: the
+// GPU can still be drawing from the previous frame's when the next upload
+// comes, and writing into a texture in use makes the driver wait for it.
+constexpr int kTexRing = 3;
+GLuint g_texs[kTexRing] = {};
+int g_tex_index = 0;
+GLuint g_tex = 0;           // this frame's
+double g_upload_ms = 0;     // the last glTexSubImage2D, for the performance log
 int g_viewport_w = 1280, g_viewport_h = 720;
 
 GLuint CompileShader(GLenum type, const char* src) {
@@ -994,11 +1002,14 @@ bool switch_render_init(int viewport_w, int viewport_h) {
   glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)(sizeof(float) * 2));
   glBindVertexArray(0);
 
-  glGenTextures(1, &g_tex);
-  glBindTexture(GL_TEXTURE_2D, g_tex);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, kFbW, kFbH, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, nullptr);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glGenTextures(kTexRing, g_texs);
+  for (GLuint tex : g_texs) {
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, kFbW, kFbH, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  }
+  g_tex = g_texs[0];
 
   glDisable(GL_DEPTH_TEST);
   glDisable(GL_CULL_FACE);
@@ -1026,9 +1037,13 @@ void switch_render_frame(const uint16_t* framebuffer565) {
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
   }
 
+  g_tex_index = (g_tex_index + 1) % kTexRing;
+  g_tex = g_texs[g_tex_index];
   glBindTexture(GL_TEXTURE_2D, g_tex);
+  const uint64_t upload_start = armGetSystemTick();
   glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kFbW, kFbH, GL_RGB, GL_UNSIGNED_SHORT_5_6_5,
                    framebuffer565);
+  g_upload_ms = (double)armTicksToNs(armGetSystemTick() - upload_start) / 1e6;
 
   const std::string& shader = g_settings.shader_mode;
   // xBR/SABR/Scale2x/Scale3x/Super2xSaI all read specific neighbor texels
@@ -1141,8 +1156,11 @@ void switch_render_frame(const uint16_t* framebuffer565) {
   glBindVertexArray(0);
 }
 
+double switch_render_last_upload_ms() { return g_upload_ms; }
+
 void switch_render_shutdown() {
-  if (g_tex) glDeleteTextures(1, &g_tex);
+  if (g_texs[0]) glDeleteTextures(kTexRing, g_texs);
+  for (GLuint& tex : g_texs) tex = 0;
   if (g_vbo) glDeleteBuffers(1, &g_vbo);
   if (g_vao) glDeleteVertexArrays(1, &g_vao);
   if (g_pixel.id) glDeleteProgram(g_pixel.id);

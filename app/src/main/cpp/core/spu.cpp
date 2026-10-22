@@ -112,11 +112,14 @@ void Spu::LoadState(StateReader& r) {
   UpdateBeatIrq();
 }
 
-void Spu::RunCycles(int cycles) {
-  int fired = sample_clock_.Tick(cycles);
+// Both clocks are already charged by RunCycles(). Neither GenerateSample()
+// nor the envelope work touches the clocks, so charging the envelope clock
+// before generating samples matches the old Tick()-then-Tick() order.
+void Spu::RunEvents() {
+  int fired = sample_clock_.Drain();
   while (fired--) GenerateSample();
 
-  fired = envelope_clock_.Tick(cycles);
+  fired = envelope_clock_.Drain();
   while (fired--) {
     env_tick_++;
     for (int i = 0; i < 16; i++) {

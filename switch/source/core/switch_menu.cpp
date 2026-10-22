@@ -225,21 +225,25 @@ std::string BiosPath(const std::string& filename) { return std::string(kBiosDir)
 // "Configuration" - documented by veesem's author in 2025), which is more
 // detailed than MAME's and shows two codes swapping meaning between BIOS
 // versions: 0x2 is UK English on v1.02 but Italian on v1.03, and 0xA the
-// reverse. On v1.00 every code below 7 behaves as US English. The Motion
-// labels are still MAME's (src/mame/vtech/vsmile.cpp, vsmilem's REGION
-// port) - the wiki doesn't cover the Motion BIOS.
+// reverse. On v1.00 every code below 7 behaves as US English. The Spanish
+// Motion BIOS's labels come from its own test screen ("Language:" line),
+// boot logo and insert-cartridge prompt, captured for all 16 codes - they
+// replace MAME's guesses (which called 0x8 Mexican Spanish; the test screen
+// says PO). 0x5/0x6/0xA/0xE draw identical frames; only the test screen's
+// language tag tells 0x5 (US) from the others (UK).
 std::string RegionLabel(int code, const BiosInfo& bios) {
   if (bios.family == BiosFamily::Motion && bios.version == 0) {  // the Spanish dump's own code
-    static const std::pair<int, const char*> kMotion[] = {
-        {0x02, "Italian"},    {0x05, "English (1)"},     {0x06, "English (2)"},
-        {0x07, "Chinese"},    {0x08, "Mexican Spanish"}, {0x09, "Dutch (?)"},
-        {0x0b, "German"},     {0x0c, "Spanish"},         {0x0d, "French"},
-        {0x0f, "English (3)"},
+    static const char* const kMotion[16] = {
+        "English (UK), no boot screen", "English (US), no boot screen or prompt",
+        "Italian",                      "English (US), no subtitle or prompt",
+        "English (US), no subtitle",    "English (US)",
+        "English (UK)",                 "Chinese",
+        "Portuguese",                   "Dutch",
+        "English (UK)",                 "German",
+        "Spanish",                      "French",
+        "English (UK)",                 "English (US, \"Smartridge\")",
     };
-    for (const auto& e : kMotion) {
-      if (e.first == code) return e.second;
-    }
-    return "(undocumented)";
+    return kMotion[code & 0xF];
   }
 
   switch (code) {
@@ -599,6 +603,7 @@ enum GraphicsRow {
   GX_BACKGROUND,
   GX_BEZEL,
   GX_LEDS,
+  GX_PERF,
   GX_CRT_CURVE,
   GX_CRT_GLOW,
   GX_CRT_SCAN,
@@ -619,6 +624,7 @@ std::vector<GraphicsRow> VisibleGraphicsRows() {
   rows.push_back(GX_BACKGROUND);
   rows.push_back(GX_BEZEL);
   rows.push_back(GX_LEDS);
+  rows.push_back(GX_PERF);
   if (IsCrtShader()) {
     rows.push_back(GX_CRT_CURVE);
     rows.push_back(GX_CRT_GLOW);
@@ -639,6 +645,7 @@ std::string GraphicsRowLabel(GraphicsRow r) {
     case GX_BACKGROUND: return "Background";
     case GX_BEZEL: return "TV Bezel";
     case GX_LEDS: return "Controller LEDs";
+    case GX_PERF: return "Performance";
     case GX_CRT_CURVE: return "CRT Curvature";
     case GX_CRT_GLOW: return "CRT Glow";
     case GX_CRT_SCAN: return "CRT Scanlines";
@@ -668,6 +675,10 @@ std::string GraphicsRowValue(GraphicsRow r) {
       return kBackgroundNames[OptionIndex(kBackgroundKeys, kOptionCount3, g_settings.background_mode)];
     case GX_BEZEL: return kBezelNames[OptionIndex(kBezelKeys, kOptionCount3, g_settings.bezel_mode)];
     case GX_LEDS: return g_settings.show_leds ? "Shown" : "Hidden";
+    case GX_PERF: {
+      static const char* const kPerfModes[] = {"Hidden", "Shown", "Shown + log"};
+      return kPerfModes[g_settings.perf_mode];
+    }
     case GX_CRT_CURVE: return Pct(g_settings.crt_curve);
     case GX_CRT_GLOW: return Pct(g_settings.crt_glow);
     case GX_CRT_SCAN: return Pct(g_settings.crt_scan);
@@ -832,13 +843,13 @@ std::vector<LibraryStorageRow> VisibleLibraryStorageRows() {
   std::vector<LibraryStorageRow> rows = {LS_GAME_FOLDERS};
   if (g_settings_return_to != Screen::InGamePause) {
     rows.push_back(LS_BIOS);
-    // Booting the BIOS alone (no cartridge) needs a BIOS; the Spanish Motion
-    // BIOS has no test screen (findings.md §8), so that row is hidden for it.
+    // Booting the BIOS alone (no cartridge) needs a BIOS. Every known BIOS
+    // has a test screen - the Spanish Motion one (v7.05) through its own
+    // OFF-press sequence, which main.cpp's ScriptTestScreenEntry() plays.
     const std::string active = ActiveBiosFile(ListBiosFiles());
     if (!active.empty()) {
       rows.push_back(LS_BOOT_BIOS);
-      const BiosInfo info = switch_bios_identify_file(BiosPath(active));
-      if (info.family != BiosFamily::Motion || info.version != 0) rows.push_back(LS_BIOS_TEST);
+      rows.push_back(LS_BIOS_TEST);
     }
     rows.push_back(LS_REGION);
     rows.push_back(LS_VIDEO_TIMING);
@@ -878,7 +889,7 @@ void RenderLibraryStorage(int viewport_w, int viewport_h) {
             break;
           case LS_BIOS_TEST:
             label = "BIOS test screen";
-            value = "ON + OFF + RESET at power-on";
+            value = "Main Unit Test Program";
             break;
           case LS_REGION:
             label = "Region";
@@ -1107,6 +1118,7 @@ MenuAction switch_menu_update(uint64_t k_down, uint64_t /*k_held*/, std::string&
         switch (rows[(size_t)g_graphics_sel]) {
           case GX_RENDERER: g_settings.accurate_renderer = !g_settings.accurate_renderer; break;
           case GX_LEDS: g_settings.show_leds = !g_settings.show_leds; break;
+          case GX_PERF: g_settings.perf_mode = (g_settings.perf_mode + dir + 3) % 3; break;
           case GX_FRAMESKIP_MODE: {
             const int idx =
                 (OptionIndex(kFrameSkipModeKeys, 3, g_settings.frame_skip_mode) + dir + 3) % 3;
