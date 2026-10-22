@@ -191,8 +191,16 @@ Each needs its protocol worked out from the games' own code. toadster172's u'nSP
          them at native size rather than as rendered in the PDF.
       3. **Art Studio tablet** (last).
       All map naturally to the Switch touch screen.
-- [ ] **V.Link.** A plain SPI serial flash on the console's SPI bus (Motion schematic: IOA0–IOA4
-      = clock, MOSI, MISO, busy, chip select). Two confirmed uses in games:
+- [ ] **V.Link.** An SPI serial flash (SST25VF016B) behind a controller chip, on IOA0-IOA4 (Motion
+      schematic: SPICLK, MOSI, MISO, BUSY, CS). *Scoped (`reference/findings.md` §29-30):*
+      - Games drive it through VTech's library: bit-banged SPI with a BUSY handshake, framed
+        packets to the controller chip (Action Mania's detection sends `16 01 01 00 ac 01 ac`
+        ...), not raw flash commands.
+      - The library only uses port A when the console-type straps read `0xC000` with IOC5 high,
+        so the Motion console type goes back to `0xC000` (1.1.0's `0x4000` disables it; see
+        `docs/console-type-and-bios.md`).
+      - Next: work out the command set from the library, emulate a V.Link backed by a file.
+      Two confirmed uses in games:
       - **Scores**, uploaded to an online leaderboard. We could parse and show them locally.
       - **Coins**, about four per game, which unlocked PC "Bonus Games". Several game manuals
         give the exact coin unlock conditions, which makes an easy test. Known bonus game names:

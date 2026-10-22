@@ -2,45 +2,75 @@
 
 ## Console-type straps (port A)
 
-The wiki's `io` page, from the V.Smile Motion schematic, gives the console type as two strapped
-pins on port A:
+Two pins on port A, IOA14 and IOA15, each with a jumper to ground, tell games which console
+they're on. The V.Smile Motion schematic (FCC, VTech 80-78800 "VSA console") labels them like
+this:
 
-| Console | IOA14 | IOA15 | Port A value |
+```
+IOA14 - JP1 to GND   "V.Smile short it"
+IOA15 - JP2 to GND   "V.Smile Open it"
+New V.Smile:  JP1=0, JP2=1
+New V.Pocket: JP1=0, JP2=0
+Old V.Smile & V.Pocket: JP1=1
+```
+
+The wiki's `io` page reads "1" as "jumper fitted" (the pin reads 0), which gives:
+
+| Console (schematic legend) | IOA14 | IOA15 | Port A value |
 |---|---|---|---|
-| V.Smile, V.Smile Pocket | 0 | x | `0x0000` (or `0x8000`) |
-| V.Smile Motion | 1 | 0 | `0x4000` |
-| Cyber Pocket | 1 | 1 | `0xC000` |
+| Old V.Smile, V.Pocket | 0 | x | `0x0000` (or `0x8000`) |
+| New V.Smile | 1 | 0 | `0x4000` |
+| New V.Pocket | 1 | 1 | `0xC000` |
 
-MAME's `vsmilem` driver returns `0xC000` for the Motion, which by this table is the Cyber Pocket.
+The legend doesn't name the Motion. The wiki took it to be "New V.Smile" (`0x4000`); MAME's
+`vsmilem` driver returns `0xC000`. **The evidence below says the Motion reads `0xC000`.**
 
 ### How games read them
 
-We disassembled every port A read (`3D01`) in the Motion carts we have. Two patterns:
+Every port A read (`3D01`) in all 105 Motion carts we have falls into two kinds of routine:
 
-**IOA14 only.** Used by Action Mania, Winnie the Pooh, Up, Little Einsteins, Scooby-Doo!, Thomas
-and Spider-Man. For example, Action Mania's `0x5608C`:
+**IOA14 first.** For example, Action Mania's `0x5608C`:
 ```
 r2 = [3D01]
 if (r2 & 0x4000) return 2      ; Motion-type board
 if (r2 & 0x8000) return 1
 return 0
 ```
-Little Einsteins has the same routine at `0x4BBFB`.
+`0x4000` and `0xC000` give the same answer. This decides, among other things, whether a game
+shows its V.Link button (greyed out until a V.Link answers).
 
-**The shared three-way routine.** At `0xB9C8` in most carts; `0x41101F` in Shrek Forever After. It
-stores a console-type variable (Shrek: `[142B]`):
+**The V.Link init.** At `0xB9C8` in most carts (`0x41101F` in Shrek Forever After), part of
+VTech's V.Link library. It stores which wiring the V.Link uses (Action Mania: `[21C4]`):
 
-| `3D01 & 0xC000` | Result |
+| `3D01 & 0xC000` | V.Link wiring |
 |---|---|
-| `0x4000` or `0x8000` | type 0 |
-| `0x0000` | type 2 |
-| `0xC000` | type 1 if **IOC5** (`3D0B` bit 5, port C) reads high, else type 0 |
+| `0x0000` | port C (IOC12 handshake) |
+| `0x4000` or `0x8000` | none - the library never talks to a V.Link |
+| `0xC000`, **IOC5** (`3D0B` bit 5) high | port A: IOA0 clock, IOA1 data out, IOA2 data in, IOA3 busy handshake, IOA4 chip select |
+| `0xC000`, IOC5 low | none |
 
-Type 1 then reconfigures port A; it's presumably the Cyber Pocket's handheld (LCD) mode. So
-`0x4000` is the Motion value every game agrees on.
+Nothing else in any Motion cart treats `0x4000` and `0xC000` differently.
 
-IOC5's role is otherwise unknown (the wiki suggests LCD/TV detection). An emulator that drives
-IOC5 high and reports the MAME value `0xC000` sends these games down the type-1 path.
+**The Motion's V.Link is on port A.** The schematic labels the SoC's IOA0-IOA4 as SPICLK, MOSI,
+MISO, BUSY and CS, running to the "TO V.LINK" connector: exactly the library's port A wiring,
+busy handshake included. Since the library only uses port A for `0xC000` with IOC5 high, a
+Motion whose V.Link port works must read **`0xC000` with IOC5 high**, MAME's value. The legend's
+"New V.Smile" (`0x4000`) is then another product on the same board. The **Cyber Pocket** fits
+`0xC000` with **IOC5 low**: no V.Link (as a handheld, its LCD uses port A), and the v1.03 BIOS runs
+a power-sequencing routine when IOC5 is low.
+
+*Corrected in October 2026:* D.Smile NX 1.1.0 switched its Motion console from `0xC000` to the
+wiki's `0x4000`, reading the third case of the routine above as "presumably the Cyber Pocket's
+handheld mode". It's the V.Link wiring. On `0x4000`, games never look for a V.Link at all. Booting
+all 105 Motion carts on both values showed no other difference: 77 identical at three
+checkpoints, the rest the same screens slightly shifted in time (on `0xC000` the games spend about
+2% of their instructions waiting on the V.Link handshake when nothing answers). D.Smile NX goes
+back to `0xC000` with its V.Link emulation.
+
+**The same board's region jumpers** (JP10-JP13, read as the region code's four bits) are
+labelled: 1111 US, 1110 UK, 1101 FR, 1011 Ger, 1100 SP, 1001 DU (NL), 0111 CN, 0010 IT, 1000 PO.
+That matches what the Spanish Motion BIOS's test screen shows for each code (below), including
+`8` = Portuguese and `9` = Dutch. JP14 is the VTech-logo jumper (open: with logo).
 
 ### The console type is part of a running game's state
 
@@ -167,6 +197,9 @@ screen, the boot logo, and the insert-cartridge screen with no cart.
 | D | FR | Apprendre En Mouvements | ® | "Insérer une cartouche" |
 | E | UK | Active Learning System | ® | "Please insert a Learning Game" |
 | F | US | Active Learning System | ™ | "Please insert a Smartridge™" |
+
+The Motion board's own region-jumper labels (see "Console-type straps" above) agree with every
+named code here.
 
 What this corrects or adds compared with MAME's list (`vsmilem`'s REGION port):
 - **8 is Portuguese, not Mexican Spanish.** MAME went by the "Sistema Educativo" subtitle, which

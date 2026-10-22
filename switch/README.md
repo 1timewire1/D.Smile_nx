@@ -527,6 +527,12 @@ It's now identified as "Motion (US unit, v1.03)":
 - The BIOS test screen row appears for it; its test screen works.
 - It still selects the Motion console, since it came from one.
 
+**Correction (after 1.2.0):** the Motion is most likely `0xC000` with IOC5 high
+after all - the "third type" below is VTech's V.Link wiring selector (port A, where the
+Motion schematic wires its V.Link connector), not a Cyber Pocket mode. Details in
+`docs/console-type-and-bios.md`; the core goes back to `0xC000` with the V.Link work. The
+original reasoning follows.
+
 **Console type (port A IOA14/IOA15).** The wiki's `io` page, from the Motion
 schematics:
 
